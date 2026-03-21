@@ -3,7 +3,7 @@ from shared.models import GridSignal, PowerBid, BidResponse
 from agents.trucks.bidding import decide_bid
 from datetime import datetime
 
-TERMINAL_ADDRESS = "placeholder"  # replace with Person 2's terminal agent address
+TERMINAL_ADDRESS = "agent1q2dsyxc0g3482s3cewzss6vf4gakd2r8znask0gpmqrnvm0p5n0fy9gsulk"
 
 # --- 3 trucks from different companies, each with private battery state ---
 truck1 = Agent(name="amazon_truck", seed="amazon_truck_seed", port=8001)
