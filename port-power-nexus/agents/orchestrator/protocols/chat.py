@@ -1,3 +1,4 @@
+import os
 from datetime import datetime
 from typing import Literal, Optional
 from uuid import uuid4
@@ -23,12 +24,24 @@ protocol = Protocol(spec=chat_protocol_spec)
 
 IntentType = Literal["start_auction_for_truck", "get_truck_status", "unknown"]
 
-GRID_AGENT_ADDRESS = "agent://grid"
-TERMINAL_AGENT_ADDRESS = "agent1q2dsyxc0g3482s3cewzss6vf4gakd2r8znask0gpmqrnvm0p5n0fy9gsulk"
-TRUCK_STATUS_AGENT_ADDRESS = "agent://truck-status"
-AMAZON_TRUCK_AGENT_ADDRESS = "agent1qt64xcals30mgjk0vgjykjen7j6wq0m3mp4ny0k5ymnpkaeadmxtqz3hp36"
-FEDEX_TRUCK_AGENT_ADDRESS = "agent1q0n4pnt8c25efcfzj3v9fwxp6fqw6lmn0yy279czrsem9hzvftgz7n4nmsq"
-UPS_TRUCK_AGENT_ADDRESS = "agent1qtelk9cdqsacsyz6re8edxugphks6z6cgaynn0q5w87m9h3x0zrqxxyslsx"
+GRID_AGENT_ADDRESS = os.getenv("GRID_AGENT_ADDRESS", "agent://grid")
+TERMINAL_AGENT_ADDRESS = os.getenv(
+    "TERMINAL_AGENT_ADDRESS",
+    "agent1q2dsyxc0g3482s3cewzss6vf4gakd2r8znask0gpmqrnvm0p5n0fy9gsulk",
+)
+TRUCK_STATUS_AGENT_ADDRESS = os.getenv("TRUCK_STATUS_AGENT_ADDRESS", "agent://truck-status")
+AMAZON_TRUCK_AGENT_ADDRESS = os.getenv(
+    "AMAZON_TRUCK_AGENT_ADDRESS",
+    "agent1qt64xcals30mgjk0vgjykjen7j6wq0m3mp4ny0k5ymnpkaeadmxtqz3hp36",
+)
+FEDEX_TRUCK_AGENT_ADDRESS = os.getenv(
+    "FEDEX_TRUCK_AGENT_ADDRESS",
+    "agent1q0n4pnt8c25efcfzj3v9fwxp6fqw6lmn0yy279czrsem9hzvftgz7n4nmsq",
+)
+UPS_TRUCK_AGENT_ADDRESS = os.getenv(
+    "UPS_TRUCK_AGENT_ADDRESS",
+    "agent1qtelk9cdqsacsyz6re8edxugphks6z6cgaynn0q5w87m9h3x0zrqxxyslsx",
+)
 
 
 class ParsedCommand(BaseModel):
