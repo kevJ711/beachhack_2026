@@ -27,3 +27,5 @@ class BidResponse(Model):
     bay: Optional[str]
     price_confirmed: float
     queue_position: int
+
+
