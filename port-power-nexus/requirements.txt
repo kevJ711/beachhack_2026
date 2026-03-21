@@ -1,0 +1,6 @@
+uagents
+openai
+supabase
+pydantic
+httpx
+python-dotenv

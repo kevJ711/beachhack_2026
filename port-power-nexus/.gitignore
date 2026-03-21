@@ -1,7 +1,6 @@
-.env.local
+.env
 __pycache__/
 *.pyc
 node_modules/
 frontend/dist/
 frontend/.vite/
-dist/
