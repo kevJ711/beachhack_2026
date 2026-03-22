@@ -1,25 +1,44 @@
+import random
 from uagents import Agent, Context, Bureau
-from uagents.setup import fund_agent_if_low
 from shared.models import GridSignal, PowerBid, BidResponse
 from shared.supabase_client import supabase
 from agents.trucks.bidding import decide_bid
 from datetime import datetime
 
 TERMINAL_ADDRESS = "agent1q2dsyxc0g3482s3cewzss6vf4gakd2r8znask0gpmqrnvm0p5n0fy9gsulk"
-TERMINAL_WALLET = "fetch1xz6mhfxl79l47r3x5n4lclrfs46rr8k26g9yt7"  # terminal agent wallet
+
+# Starting virtual credits per truck (USD)
+STARTING_BALANCE = {
+    "amazon_truck": 200.0,
+    "fedex_truck":  200.0,
+    "ups_truck":    200.0,
+    "dhl_truck":    200.0,
+    "rivian_truck": 200.0,
+}
 
 
-def _soc_from_hub(truck_name: str, fallback: float) -> float:
+def _truck_state_from_hub(truck_name: str, fallback_soc: float) -> tuple[float, int]:
     r = (
         supabase.table("trucks")
-        .select("state_of_charge")
+        .select("state_of_charge,distance_to_port")
         .eq("name", truck_name)
         .limit(1)
         .execute()
     )
     if r.data:
-        return float(r.data[0]["state_of_charge"])
-    return fallback
+        return float(r.data[0]["state_of_charge"]), int(r.data[0].get("distance_to_port") or 10)
+    return fallback_soc, 10
+
+
+def _get_balance(truck_name: str) -> float:
+    r = supabase.table("trucks").select("balance").eq("name", truck_name).limit(1).execute()
+    if r.data and r.data[0]["balance"] is not None:
+        return float(r.data[0]["balance"])
+    return STARTING_BALANCE.get(truck_name, 500.0)
+
+
+def _set_balance(truck_name: str, balance: float) -> None:
+    supabase.table("trucks").update({"balance": round(balance, 2)}).eq("name", truck_name).execute()
 
 
 def stress_label(stress: float) -> str:
@@ -29,32 +48,82 @@ def stress_label(stress: float) -> str:
         return "medium"
     return "high"
 
-# --- 3 trucks from different companies, each with private battery state ---
-truck1 = Agent(name="amazon_truck", seed="amazon_truck_seed")
-truck2 = Agent(name="fedex_truck", seed="fedex_truck_seed")
-truck3 = Agent(name="ups_truck", seed="ups_truck_seed")
 
-def _update_balance(truck_name: str, balance_atestfet: int) -> None:
-    supabase.table("trucks").update({"balance": balance_atestfet}).eq("name", truck_name).execute()
+DESTINATIONS = [
+    "Oakland", "San Diego", "Fresno", "Sacramento", "Las Vegas", "Phoenix", "Seattle",
+    "Denver", "Salt Lake City", "Portland", "Reno", "Tucson", "Albuquerque",
+    "Chicago", "Dallas", "Houston",
+]
+
+def _randomize_truck(truck_name: str, battery_ref: list) -> dict:
+    soc = random.randint(10, 95)
+    distance = random.randint(5, 40)
+    hours_until_deadline = random.randint(20, 120)  # 20-120 minutes until departure
+    destination = random.choice(DESTINATIONS)
+    battery_ref[0] = float(soc)
+    supabase.table("trucks").update({
+        "state_of_charge": soc,
+        "distance_to_port": distance,
+        "status": "idle",
+        "destination": destination,
+        "hours_until_deadline": hours_until_deadline,
+    }).eq("name", truck_name).execute()
+    return {"hours_until_deadline": hours_until_deadline, "destination": destination}
 
 
-def _make_startup(agent: Agent, truck_name: str):
+def _make_startup(truck_name: str, battery_ref: list, meta_ref: dict):
     async def _startup(ctx: Context):
-        fund_agent_if_low(agent.wallet.address())
-        balance = ctx.ledger.query_bank_balance(agent.wallet.address())
-        _update_balance(truck_name, int(balance))
-        ctx.logger.info(f"{truck_name} wallet: {agent.wallet.address()} | balance: {balance} atestfet")
+        starting = STARTING_BALANCE.get(truck_name, 50.0)
+        _set_balance(truck_name, starting)
+        info = _randomize_truck(truck_name, battery_ref)
+        meta_ref.update(info)
+        ctx.logger.info(
+            f"{truck_name}: balance=${starting:.2f} | SOC={battery_ref[0]:.0f}% | "
+            f"dest={info['destination']} | deadline={info['hours_until_deadline']}h"
+        )
     return _startup
 
 
-def _make_on_grid(agent: Agent, truck_name: str, requested_kwh: float, battery_ref: list):
+BATTERY_CAPACITY_KWH = 500.0  # Tesla Semi-class heavy EV freight truck
+
+DEST_DISTANCES = {
+    "Oakland": 50, "San Diego": 120, "Fresno": 185, "Sacramento": 90,
+    "Las Vegas": 270, "Phoenix": 370, "Seattle": 1140,
+    "Denver": 1020, "Salt Lake City": 690, "Portland": 1080,
+    "Reno": 480, "Tucson": 490, "Albuquerque": 790,
+    "Chicago": 2020, "Dallas": 1430, "Houston": 1550,
+}
+
+def _calc_requested_kwh(battery_level: float, destination: str) -> float:
+    trip_miles = DEST_DISTANCES.get(destination, 150)
+    battery_needed_pct = min(95, round(trip_miles * 0.35 + 15))
+    shortfall_pct = max(0, battery_needed_pct - battery_level)
+    # If no shortfall, request a small top-up (10%) so the truck still considers charging
+    if shortfall_pct == 0:
+        return round(0.10 * BATTERY_CAPACITY_KWH, 1)
+    return round((shortfall_pct / 100) * BATTERY_CAPACITY_KWH, 1)
+
+
+def _make_on_grid(truck_name: str, requested_kwh: float, battery_ref: list, meta_ref: dict):
     async def _on_grid(ctx: Context, sender: str, signal: GridSignal):
-        battery_ref[0] = _soc_from_hub(truck_name, battery_ref[0])
-        result = decide_bid(battery_ref[0], signal.current_price, stress_label(signal.grid_stress))
+        battery_ref[0], distance = _truck_state_from_hub(truck_name, battery_ref[0])
+        balance = _get_balance(truck_name)
+        destination = meta_ref.get("destination", "Unknown")
+        dynamic_kwh = _calc_requested_kwh(battery_ref[0], destination)
+        result = decide_bid(
+            battery_ref[0],
+            signal.current_price,
+            stress_label(signal.grid_stress),
+            distance_to_port=distance,
+            requested_kwh=dynamic_kwh,
+            balance=balance,
+            hours_until_deadline=meta_ref.get("hours_until_deadline", 4),
+            destination=destination,
+        )
         bid = PowerBid(
             truck_id=truck_name,
             battery_level=battery_ref[0],
-            requested_kwh=requested_kwh,
+            requested_kwh=dynamic_kwh,
             bid_price=result["bid_price"],
             reasoning=result["reasoning"],
             timestamp=datetime.now()
@@ -64,25 +133,19 @@ def _make_on_grid(agent: Agent, truck_name: str, requested_kwh: float, battery_r
     return _on_grid
 
 
-def _make_on_response(agent: Agent, truck_name: str, requested_kwh: float, battery_ref: list):
+def _make_on_response(truck_name: str, battery_ref: list, meta_ref: dict):
     async def _on_response(ctx: Context, sender: str, response: BidResponse):
         if response.accepted:
-            battery_ref[0] = _soc_from_hub(truck_name, battery_ref[0])
-            ctx.logger.info(f"{truck_name}: charging at bay {response.bay} — SOC {battery_ref[0]:.0f}% (hub)")
-            cost_atestfet = int(response.price_confirmed * requested_kwh * 1_000_000)
-            try:
-                ctx.ledger.send_tokens(
-                    destination=TERMINAL_WALLET,
-                    amount=cost_atestfet,
-                    denom="atestfet",
-                    sender=agent.wallet,
-                    memo=f"charge-{truck_name}-{response.bay}",
-                )
-                new_balance = ctx.ledger.query_bank_balance(agent.wallet.address())
-                _update_balance(truck_name, int(new_balance))
-                ctx.logger.info(f"{truck_name}: paid {cost_atestfet} atestfet | remaining: {new_balance}")
-            except Exception as e:
-                ctx.logger.warning(f"{truck_name}: payment failed — {e}")
+            battery_ref[0], _ = _truck_state_from_hub(truck_name, battery_ref[0])
+            kwh = _calc_requested_kwh(battery_ref[0], meta_ref.get("destination", "Unknown"))
+            cost = round(response.price_confirmed * kwh, 2)
+            balance = _get_balance(truck_name)
+            new_balance = max(0.0, balance - cost)
+            _set_balance(truck_name, new_balance)
+            ctx.logger.info(
+                f"{truck_name}: charging at bay {response.bay} — "
+                f"SOC {battery_ref[0]:.0f}% | paid ${cost:.2f} | balance ${new_balance:.2f}"
+            )
         else:
             ctx.logger.info(f"{truck_name}: rejected, queue position {response.queue_position}")
     return _on_response
@@ -91,31 +154,22 @@ def _make_on_response(agent: Agent, truck_name: str, requested_kwh: float, batte
 # ─────────────────────────── TRUCK DEFINITIONS ───────────────────────────
 
 _TRUCKS = [
-    ("amazon_truck", "amazon_truck_seed", 8011, 50.0, 20.0),
-    ("fedex_truck",  "fedex_truck_seed",  8012, 40.0, 55.0),
-    ("ups_truck",    "ups_truck_seed",    8013, 30.0, 80.0),
-    ("dhl_truck",    "dhl_truck_seed",    8014, 45.0, 35.0),
-    ("rivian_truck", "rivian_truck_seed", 8015, 60.0, 10.0),
+    ("amazon_truck", "amazon_truck_seed", 8011),
+    ("fedex_truck",  "fedex_truck_seed",  8012),
+    ("ups_truck",    "ups_truck_seed",    8013),
+    ("dhl_truck",    "dhl_truck_seed",    8014),
+    ("rivian_truck", "rivian_truck_seed", 8015),
 ]
 
 _agents = {}
-for _name, _seed, _port, _kwh, _soc in _TRUCKS:
+for _name, _seed, _port in _TRUCKS:
     _agent = Agent(name=_name, seed=_seed, port=_port, endpoint=[f"http://localhost:{_port}/submit"])
-    _batt = [_soc]
+    _batt = [float(random.randint(10, 95))]
+    _meta = {"hours_until_deadline": random.randint(20, 120), "destination": random.choice(DESTINATIONS)}
 
-    def _make_balance_poll(a: Agent, n: str):
-        async def _poll(ctx: Context):
-            try:
-                bal = ctx.ledger.query_bank_balance(a.wallet.address())
-                _update_balance(n, int(bal))
-            except Exception:
-                pass
-        return _poll
-
-    _agent.on_event("startup")(_make_startup(_agent, _name))
-    _agent.on_message(model=GridSignal)(_make_on_grid(_agent, _name, _kwh, _batt))
-    _agent.on_message(model=BidResponse)(_make_on_response(_agent, _name, _kwh, _batt))
-    _agent.on_interval(period=30.0)(_make_balance_poll(_agent, _name))
+    _agent.on_event("startup")(_make_startup(_name, _batt, _meta))
+    _agent.on_message(model=GridSignal)(_make_on_grid(_name, 0, _batt, _meta))
+    _agent.on_message(model=BidResponse)(_make_on_response(_name, _batt, _meta))
 
     _agents[_name] = _agent
 

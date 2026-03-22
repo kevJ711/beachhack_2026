@@ -31,6 +31,16 @@ const TRUCK_PATHS = {
     tooltipOffset: { x: -110, y: -50 },
     driftDuration: 3.6,
   },
+  dhl_truck: {
+    approachPosition: { x: 150, y: 272 },
+    tooltipOffset: { x: 20, y: -50 },
+    driftDuration: 4.5,
+  },
+  rivian_truck: {
+    approachPosition: { x: 230, y: 285 },
+    tooltipOffset: { x: -110, y: -50 },
+    driftDuration: 5.8,
+  },
   TRUCK_01: {
     approachPosition: { x: 175, y: 275 },
     tooltipOffset: { x: 20, y: -50 },
@@ -119,7 +129,6 @@ function latestReasoningForTruck(powerBids, truckId, maxLen = 38) {
 }
 
 function resolveTruckPosition(truck, baysRows) {
-  const path = getTruckPath(truck.name)
   const status = effectiveMapStatus(truck, baysRows)
   const idle = getIdleCenterForTruck(truck.name)
 
@@ -136,7 +145,8 @@ function resolveTruckPosition(truck, baysRows) {
     return { x: idle.x, y: idle.y }
   }
   if (status === 'bidding') {
-    return path.approachPosition
+    // Approach from the truck's own pier slot toward the charging zone
+    return { x: idle.x, y: idle.y + 20 }
   }
   return { x: idle.x, y: idle.y }
 }
@@ -170,6 +180,21 @@ const svgStyles = `
   }
 `
 
+const TOOLTIP_OFFSETS = [
+  { x: 20, y: -50 },
+  { x: 20, y: -50 },
+  { x: -110, y: -50 },
+  { x: 20, y: -50 },
+  { x: -110, y: -50 },
+]
+
+const TRUCK_ORDER = ['amazon_truck', 'fedex_truck', 'ups_truck', 'dhl_truck', 'rivian_truck']
+
+function getTruckTooltipOffset(name) {
+  const idx = TRUCK_ORDER.indexOf(name)
+  return TOOLTIP_OFFSETS[idx >= 0 ? idx : 0]
+}
+
 function TruckNode({ truck, baysRows, powerBids, respawnEpoch = 0 }) {
   const status = effectiveMapStatus(truck, baysRows)
   const idleCenter = getIdleCenterForTruck(truck.name)
@@ -185,17 +210,19 @@ function TruckNode({ truck, baysRows, powerBids, respawnEpoch = 0 }) {
     respawnEpoch > 0 ? idleCenter.y : null
   )
   const path = getTruckPath(truck.name)
-  const off = path.tooltipOffset
+  const off = getTruckTooltipOffset(truck.name)
   const colors = nodeColors(status)
-  const drift = `${path.driftDuration ?? 4}s`
+  const drift = `${path?.driftDuration ?? 4}s`
   const reasoning = latestReasoningForTruck(
     powerBids,
     truck.id,
     MAP_TOOLTIP_REASON_MAX
   )
   const nameLabel = truncateTooltipText(String(truck.name ?? ''), MAP_TOOLTIP_NAME_MAX)
-  const tx = pos.x + off.x
-  const ty = pos.y + off.y
+  const anchorX = status === 'charging' ? target.x : pos.x
+  const anchorY = status === 'charging' ? target.y : pos.y
+  const tx = anchorX + off.x
+  const ty = anchorY + off.y
   const tw = 100
   const th = 46
   const socDisplay = useSmoothSoc(truck.state_of_charge ?? 0)
@@ -249,8 +276,8 @@ function TruckNode({ truck, baysRows, powerBids, respawnEpoch = 0 }) {
 
       {status === 'charging' && (
         <circle
-          cx={pos.x}
-          cy={pos.y}
+          cx={target.x}
+          cy={target.y}
           r="6"
           fill="#ffaa00"
           style={{
@@ -295,8 +322,8 @@ function TruckNode({ truck, baysRows, powerBids, respawnEpoch = 0 }) {
       )}
 
       <line
-        x1={pos.x}
-        y1={pos.y}
+        x1={anchorX}
+        y1={anchorY}
         x2={tx + 8}
         y2={ty + th / 2}
         stroke="#00aaff"

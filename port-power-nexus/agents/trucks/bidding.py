@@ -10,37 +10,55 @@ openai.api_key = os.getenv("OPENAI_API_KEY")
 
 _FALLBACK_BID = {"bid_price": 0.20, "reasoning": "Fallback bid — AI unavailable."}
 
-def decide_bid(battery_level, price, grid_stress):
-    prompt = f"""You are an intelligent energy bidding agent managing a zero-emission electric truck operating at a logistics hub (such as a port, warehouse, or freight terminal).
+def decide_bid(battery_level, price, grid_stress, distance_to_port=10, requested_kwh=40.0, balance=50.0, hours_until_deadline=4, destination="Unknown"):
+    total_cost = round(price * requested_kwh, 2)
+    budget_pct = round((total_cost / balance) * 100, 1) if balance > 0 else 100
+    # Estimate battery % needed for the trip (rough: 1% per mile for heavy EV truck, +15% buffer)
+    DEST_DISTANCES = {
+        "Oakland": 50, "San Diego": 120, "Fresno": 185, "Sacramento": 90,
+        "Las Vegas": 270, "Phoenix": 370, "Seattle": 1140,
+        "Denver": 1020, "Salt Lake City": 690, "Portland": 1080,
+        "Reno": 480, "Tucson": 490, "Albuquerque": 790,
+        "Chicago": 2020, "Dallas": 1430, "Houston": 1550,
+    }
+    trip_miles = DEST_DISTANCES.get(destination, 150)
+    battery_needed_pct = min(95, round(trip_miles * 0.35 + 15))  # ~0.35% per mile + 15% buffer
+    can_make_trip = battery_level >= battery_needed_pct
+    shortfall = max(0, battery_needed_pct - battery_level)
 
-Your goal is to secure a charging slot at the lowest possible cost while ensuring the truck can continue operating without running out of battery. You must balance urgency, cost efficiency, and grid sustainability.
+    prompt = f"""You are an autonomous AI bidding agent for a zero-emission electric freight truck competing in a real-time Dutch auction for a charging bay at a smart port.
 
-Current truck status:
-- Battery level: {battery_level}% (0% = empty, 100% = full)
-- Current electricity price: ${price}/kWh
-- Grid stress level: {grid_stress} (low = grid is stable, medium = moderate demand, high = grid is strained)
+MISSION: Win a charging slot at the lowest price that still guarantees your truck completes its delivery on time. Every dollar saved is profit. Every missed delivery is a failure.
 
-Bidding rules and strategy:
-- If battery is below 20%: this is CRITICAL. Bid aggressively above market price to guarantee a slot. The truck cannot miss this charge.
-- If battery is between 20–40%: bid at or slightly above market price. Prioritize securing a slot soon.
-- If battery is between 40–60%: bid at market price. A slot is needed but not urgent.
-- If battery is between 60–80%: bid slightly below market price. Only charge if it's cost effective.
-- If battery is above 80%: bid very low or consider waiting. Charging now is optional.
+YOUR TRUCK'S SITUATION:
+- Battery: {battery_level:.0f}% charged
+- Needs {battery_needed_pct}% to reach {destination} ({trip_miles} miles away) — {"YOU CAN MAKE THE TRIP" if can_make_trip else f"YOU ARE {shortfall:.0f}% SHORT — YOU CANNOT MAKE THE TRIP WITHOUT CHARGING"}
+- Departure deadline: {hours_until_deadline} minute(s) from now
+- Distance to charging port: {distance_to_port} miles away
+- Budget remaining: ${balance:.2f}
+- This charge ({requested_kwh} kWh) costs ${total_cost} at current price (${price}/kWh) = {budget_pct}% of your budget
 
-Grid stress adjustments:
-- If grid stress is "high": lower your bid slightly to reduce strain on the grid and support zero-emission grid health. Waiting is encouraged if battery allows.
-- If grid stress is "medium": bid normally based on battery level.
-- If grid stress is "low": this is the ideal time to charge. Bid competitively to take advantage of clean, affordable energy.
+GRID CONDITIONS:
+- Electricity price: ${price}/kWh (Dutch auction — price drops every 5 seconds, first to bid wins)
+- Grid stress: {grid_stress} (low = cheap clean renewable energy available, high = expensive dirty grid)
 
-You are operating in a zero-emission freight environment. Prioritize renewable energy windows (low grid stress = higher renewable mix). Charging during low-stress periods benefits the environment and reduces costs.
+DECISION FRAMEWORK — think like a logistics optimizer:
+1. CAN YOU MAKE THE TRIP WITHOUT CHARGING? If yes and deadline > 60min, consider skipping or bidding very low.
+2. HOW URGENT IS YOUR DEADLINE? Under 30min with insufficient battery = bid whatever it takes.
+3. WHAT IS THE GRID DOING? Low stress = renewable energy window, great time to charge cheap and clean.
+4. WHAT CAN YOU AFFORD? If this charge burns >50% of budget, be conservative unless it's critical.
+5. DUTCH AUCTION LOGIC: The price is dropping — wait for a better price if you can afford to, but don't wait so long another truck wins.
 
-Based on all of the above, decide:
-1. What price per kWh to bid (bid_price) — this must be a float
-2. A clear, human-readable explanation of your reasoning (reasoning) — explain why you chose this bid given the battery level, price, and grid stress
+BIDDING RULES:
+- CRITICAL (can't make trip + deadline < 30min): Bid 15–25% above market price. Do not lose this slot.
+- URGENT (can't make trip + deadline 30–60min): Bid 5–10% above market price.
+- NEEDED (can't make trip + deadline > 60min OR battery < 40%): Bid at market price.
+- OPTIONAL (can make trip, battery > 60%): Bid 10–20% below market price or skip.
+- SKIP (can make trip, battery > 80%, deadline > 90min): Bid very low (${price * 0.5:.2f}) — only take it if it's basically free.
 
-Return ONLY a JSON object with exactly these two fields:
-- "bid_price": float (your bid in $/kWh)
-- "reasoning": string (your explanation, 2-3 sentences)"""
+Return ONLY valid JSON:
+- "bid_price": float — your bid in $/kWh, rounded to 2 decimal places
+- "reasoning": string — ONE short sentence (max 12 words) stating the key reason: e.g. "Low battery, must reach Chicago, deadline in 2h." """
     try:
         response = openai.chat.completions.create(
             model="gpt-4o-mini",
@@ -48,6 +66,9 @@ Return ONLY a JSON object with exactly these two fields:
             messages=[{"role": "user", "content": prompt}],
             timeout=10,
         )
-        return json.loads(response.choices[0].message.content)
+        result = json.loads(response.choices[0].message.content)
+        # Clamp bid_price to a sane range ($0.01 – $2.00/kWh)
+        result["bid_price"] = round(max(0.01, min(2.0, float(result["bid_price"]))), 2)
+        return result
     except Exception:
         return _FALLBACK_BID

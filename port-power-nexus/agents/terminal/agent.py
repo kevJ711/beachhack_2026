@@ -22,12 +22,28 @@ bid_queue = []
 _locked_bays: dict[str, str] = {}
 
 
+@terminal.on_event("startup")
+async def terminal_startup(ctx: Context):
+    # Reset all bays and trucks on startup so stale state doesn't block assignments
+    supabase.table("bays").update({
+        "status": "available",
+        "assigned_truck_id": None,
+        "locked_at": None,
+    }).neq("id", "00000000-0000-0000-0000-000000000000").execute()
+    supabase.table("trucks").update({
+        "status": "idle",
+        "bay_id": None,
+    }).neq("id", "00000000-0000-0000-0000-000000000000").execute()
+    _locked_bays.clear()
+    ctx.logger.info("Terminal: bays and trucks reset on startup")
+
+
 @terminal.on_message(model=PowerBid)
 async def handle_bid(ctx: Context, sender: str, bid: PowerBid):
     ctx.logger.info(f"Terminal received bid from {bid.truck_id}: ${bid.bid_price}/kWh")
     reason = (bid.reasoning or "").strip().replace("\n", " ")
-    if len(reason) > 220:
-        reason = reason[:217] + "..."
+    if len(reason) > 60:
+        reason = reason[:57] + "…"
     log_event(
         "bid",
         f"BID {bid.truck_id} ${bid.bid_price:.2f}/kWh · batt {bid.battery_level:.0f}% · {reason}",
@@ -47,11 +63,19 @@ async def handle_bid(ctx: Context, sender: str, bid: PowerBid):
         bid_queue.append(bid.truck_id)
     queue_position = bid_queue.index(bid.truck_id) + 1
 
-    # Use in-memory locked bays as source of truth to avoid Supabase race conditions
-    bay = get_available_bay(exclude_ids=list(_locked_bays.keys()))
+    # Count available bays and trucks currently waiting (not charging)
+    available_bays = get_available_bay(exclude_ids=list(_locked_bays.keys()))
+    all_available = supabase.table("bays").select("id").eq("status", "available").execute()
+    available_count = len([b for b in (all_available.data or []) if b["id"] not in _locked_bays])
+    waiting_trucks = supabase.table("trucks").select("id").in_("status", ["idle", "bidding"]).execute()
+    waiting_count = len(waiting_trucks.data or [])
+
+    # If more spots than trucks — direct assign, no auction needed
+    direct_assign = available_count >= waiting_count
+
+    bay = available_bays
 
     if bay:
-        # Reserve it in memory immediately before any async gap
         _locked_bays[bay["id"]] = bid.truck_id
         lock_bay(bay["id"], bid.truck_id)
         update_truck_status(
@@ -60,18 +84,20 @@ async def handle_bid(ctx: Context, sender: str, bid: PowerBid):
             bay["id"],
             state_of_charge=int(bid.battery_level),
         )
-        save_bid_response(bid_id, True, bay["id"], bid.bid_price, queue_position)
+        # If direct assign, use market price instead of bid price
+        confirmed_price = bid.bid_price if not direct_assign else bid.bid_price * 0.9
+        save_bid_response(bid_id, True, bay["id"], confirmed_price, queue_position)
         response = BidResponse(
             accepted=True,
             bay=bay["name"],
-            price_confirmed=bid.bid_price,
+            price_confirmed=confirmed_price,
             queue_position=queue_position
         )
-        ctx.logger.info(f"Terminal: {bid.truck_id} won bay {bay['name']}")
-        log_event("win", f"terminal → {bid.truck_id}: ACCEPTED bay={bay['name']} at ${bid.bid_price:.2f}/kWh")
-        ctx.logger.info(f"Terminal: awaiting atestfet payment from {bid.truck_id}")
+        mode = "DIRECT" if direct_assign else "AUCTION"
+        ctx.logger.info(f"Terminal: {bid.truck_id} assigned bay {bay['name']} [{mode}]")
+        log_event("win", f"terminal → {bid.truck_id}: {mode} bay={bay['name']} at ${confirmed_price:.2f}/kWh")
     else:
-        # All bays full
+        # All bays full — auction required, reject
         save_bid_response(bid_id, False, None, bid.bid_price, queue_position)
         response = BidResponse(
             accepted=False,

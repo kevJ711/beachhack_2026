@@ -43,11 +43,19 @@ function TruckCard({ truck, baysRows }) {
           {formatSocPercent(socSmooth)}
         </span>
       </div>
-      {truck.balance != null && (
-        <div style={{ marginTop: 6, fontSize: 11, color: '#00ff88', fontFamily: 'Courier New, monospace', letterSpacing: 1 }}>
-          ₮ {Number(truck.balance).toLocaleString()} atestfet
+      {truck.destination && (
+        <div style={{ marginTop: 6, fontSize: 12, color: '#aabbcc', fontFamily: 'Courier New, monospace' }}>
+          DEST: {truck.destination}
         </div>
       )}
+      {truck.hours_until_deadline != null && (
+        <div style={{ fontSize: 12, color: '#ffaa00', fontFamily: 'Courier New, monospace' }}>
+          DEPARTS IN: {truck.hours_until_deadline}m
+        </div>
+      )}
+      <div style={{ marginTop: 5, fontSize: 13, color: '#00ff88', fontFamily: 'Courier New, monospace', letterSpacing: 1 }}>
+        $ {Number(truck.balance ?? 0).toFixed(2)} credits
+      </div>
     </div>
   )
 }
@@ -66,7 +74,7 @@ export default function TruckLeaderboard({ demoTruck }) {
   return (
     <aside
       style={{
-        width: 260,
+        width: 300,
         flexShrink: 0,
         background: '#0d1225',
         borderLeft: '1px solid #1a3a5c',

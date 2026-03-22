@@ -18,6 +18,8 @@ export const TRUCK_HOME_PIER = {
   amazon_truck: 'Y1',
   fedex_truck: 'Y2',
   ups_truck: 'Y3',
+  dhl_truck: 'Y4',
+  rivian_truck: 'Y5',
   TRUCK_01: 'Y1',
   TRUCK_07: 'Y2',
   TRUCK_12: 'Y3',
