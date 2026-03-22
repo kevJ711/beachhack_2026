@@ -33,6 +33,12 @@ AUCTION_START_PRICE: float = float(os.environ.get("AUCTION_START_PRICE", "0.35")
 AUCTION_MIN_PRICE: float   = float(os.environ.get("AUCTION_MIN_PRICE",   "0.08"))   # $/kWh
 AUCTION_PRICE_STEP: float  = float(os.environ.get("AUCTION_PRICE_STEP",  "0.01"))   # drop per tick
 AUCTION_TICK_SECONDS: int  = int(os.environ.get("AUCTION_TICK_SECONDS",  "5"))
+GRID_AGENT_USE_MAILBOX: bool = os.environ.get(
+    "GRID_AGENT_USE_MAILBOX", "true"
+).lower() in {"1", "true", "yes", "on"}
+GRID_AGENT_ENDPOINT: str | None = None if GRID_AGENT_USE_MAILBOX else (
+    os.environ.get("GRID_AGENT_ENDPOINT") or None
+)
 
 
 class GridSignal(Model):
@@ -179,8 +185,8 @@ grid_agent = Agent(
     name     = "grid_agent",
     seed     = os.environ.get("GRID_AGENT_SEED", "grid_agent_secret_seed"),
     port     = int(os.environ.get("GRID_AGENT_PORT", "8001")),
-    endpoint = os.environ.get("GRID_AGENT_ENDPOINT") or None,
-    mailbox  = os.environ.get("GRID_AGENT_USE_MAILBOX", "true").lower() in {"1", "true", "yes", "on"},
+    endpoint = GRID_AGENT_ENDPOINT,
+    mailbox  = GRID_AGENT_USE_MAILBOX,
 )
 
 fund_agent_if_low(grid_agent.wallet.address())
@@ -235,7 +241,10 @@ async def on_startup(ctx: Context) -> None:
     })
     log_event(sb, "auction_start", f"Dutch auction {_state.auction_id} started at ${AUCTION_START_PRICE}/kWh")
 
-    ctx.logger.info(f"[GridAgent] Auction {_state.auction_id} started. address={ctx.address}")
+    ctx.logger.info(
+        f"[GridAgent] Auction {_state.auction_id} started. "
+        f"address={ctx.address} mailbox={GRID_AGENT_USE_MAILBOX} endpoint={GRID_AGENT_ENDPOINT}"
+    )
 
 
 @grid_agent.on_message(model=StartAuctionRequest)
