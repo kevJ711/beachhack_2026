@@ -234,7 +234,7 @@ async def on_startup(ctx: Context) -> None:
 
     ctx.logger.info(
         f"[GridAgent] Auction {_state.auction_id} started. "
-        f"address={ctx.address} mailbox={GRID_AGENT_USE_MAILBOX} endpoint={GRID_AGENT_ENDPOINT}"
+        f"address={ctx.agent.address} mailbox={GRID_AGENT_USE_MAILBOX} endpoint={GRID_AGENT_ENDPOINT}"
     )
 
 
@@ -326,8 +326,14 @@ async def auction_tick(ctx: Context) -> None:
         "status":        "active",
     })
 
-    # 5. Broadcast to all truck agents
-    log_event(sb, "signal", f"grid_agent → trucks: price=${_state.current_price:.2f}/kWh | renewable={grid['renewable_pct']}% | stress={grid['grid_stress']:.2f}")
+    # 5. Broadcast to all truck agents (throttle feed: every 3rd tick still shows grid↔swarm rhythm)
+    if _state.tick_count % 3 == 0:
+        log_event(
+            sb,
+            "signal",
+            f"grid_agent → trucks: price=${_state.current_price:.2f}/kWh | "
+            f"renewable={grid['renewable_pct']}% | stress={grid['grid_stress']:.2f}",
+        )
     for addr in TRUCK_AGENT_ADDRESSES:
         addr = addr.strip()
         if addr:

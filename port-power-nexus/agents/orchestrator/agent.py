@@ -274,7 +274,7 @@ async def route_command(ctx: Context, sender: str, command: ParsedCommand) -> st
 @orchestrator_agent.on_event("startup")
 async def startup(ctx: Context):
     ctx.logger.info(
-        f"Orchestrator started address={orchestrator_agent.address} "
+        f"Orchestrator started address={ctx.agent.address} "
         f"grid={SETTINGS.addresses.grid_agent} "
         f"terminal={SETTINGS.addresses.terminal_agent} "
         f"truck_status={SETTINGS.addresses.truck_status_agent} "

@@ -1,21 +1,26 @@
 import useRealtimeTable from '../hooks/useRealtimeTable'
+import useSmoothSoc from '../hooks/useSmoothSoc'
+import { effectiveMapStatus } from '../lib/mapTruckStatus'
 import { formatSocPercent, normalizeSoc } from '../lib/truckDisplay'
 
-function TruckCard({ truck }) {
-  const status = (truck.status ?? 'idle').toLowerCase()
+function TruckCard({ truck, baysRows }) {
+  const status = effectiveMapStatus(truck, baysRows)
+  const socSmooth = useSmoothSoc(truck.state_of_charge ?? 0)
 
   let borderColor = '#1a3a5c'
   if (status === 'bidding') borderColor = '#00aaff44'
   else if (status === 'charging') borderColor = '#ffaa0044'
+  else if (status === 'at_port') borderColor = '#88aacc44'
 
   let badgeBg = '#00ff8822'
   let badgeColor = '#00ff88'
   let label = 'IDLE'
   if (status === 'bidding') { badgeBg = '#00aaff22'; badgeColor = '#00aaff'; label = 'BIDDING' }
   else if (status === 'charging') { badgeBg = '#ffaa0022'; badgeColor = '#ffaa00'; label = 'CHARGING' }
+  else if (status === 'at_port') { badgeBg = '#4a6a8a22'; badgeColor = '#88aacc'; label = 'EXIT' }
   else if (status === 'done') { badgeBg = '#3a5a6a22'; badgeColor = '#3a5a6a'; label = 'DONE' }
 
-  const soc = normalizeSoc(truck.state_of_charge)
+  const soc = normalizeSoc(socSmooth)
   let barColor = '#00ff88'
   if (soc < 30) barColor = '#cc3333'
   else if (soc <= 60) barColor = '#cc8800'
@@ -35,7 +40,7 @@ function TruckCard({ truck }) {
           <div style={{ width: `${soc}%`, height: 4, background: barColor, borderRadius: 2 }} />
         </div>
         <span style={{ fontSize: 9, color: '#6a8aaa', fontFamily: 'Courier New, monospace' }}>
-          {formatSocPercent(truck.state_of_charge)}
+          {formatSocPercent(socSmooth)}
         </span>
       </div>
     </div>
@@ -47,8 +52,11 @@ export default function TruckLeaderboard({ demoTruck }) {
     orderBy: 'state_of_charge',
     orderAscending: true,
   })
+  const { rows: bays } = useRealtimeTable('bays')
 
-  const displayTrucks = demoTruck ? [demoTruck] : trucks
+  const displayTrucks = demoTruck
+    ? [demoTruck].filter((t) => effectiveMapStatus(t, []) !== 'at_port')
+    : (trucks ?? []).filter((t) => effectiveMapStatus(t, bays) !== 'at_port')
 
   return (
     <aside
@@ -88,6 +96,7 @@ export default function TruckLeaderboard({ demoTruck }) {
           <TruckCard
             key={t.id}
             truck={t}
+            baysRows={demoTruck ? [] : bays}
           />
         ))}
       </div>

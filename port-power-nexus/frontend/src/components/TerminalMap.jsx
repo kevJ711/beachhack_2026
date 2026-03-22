@@ -1,53 +1,57 @@
+import { useEffect, useRef, useState } from 'react'
 import useRealtimeTable from '../hooks/useRealtimeTable'
 import useSmoothPosition from '../hooks/useSmoothPosition'
+import useSmoothSoc from '../hooks/useSmoothSoc'
+import {
+  bayIsActivelyCharging,
+  effectiveMapStatus,
+} from '../lib/mapTruckStatus'
+import {
+  EXIT_RIGHT_X,
+  PIER_BOXES,
+  SPAWN_LEFT_X,
+  getIdleCenterForTruck,
+} from '../lib/pierSlots'
 import { formatSocPercent, normalizeSoc } from '../lib/truckDisplay'
 
+/** Approach + UI offsets — idle berth centers come from `getIdleCenterForTruck` (pier Y1…Y11). */
 const TRUCK_PATHS = {
-  // Live swarm (matches agents/trucks/agent.py truck_id / DB trucks.name)
   amazon_truck: {
-    idlePosition: { x: 60, y: 150 },
     approachPosition: { x: 175, y: 275 },
     tooltipOffset: { x: 20, y: -50 },
     driftDuration: 4.2,
   },
   fedex_truck: {
-    idlePosition: { x: 120, y: 230 },
     approachPosition: { x: 210, y: 268 },
     tooltipOffset: { x: 20, y: -50 },
     driftDuration: 5.1,
   },
   ups_truck: {
-    idlePosition: { x: 330, y: 145 },
     approachPosition: { x: 265, y: 280 },
     tooltipOffset: { x: -110, y: -50 },
     driftDuration: 3.6,
   },
   TRUCK_01: {
-    idlePosition: { x: 60, y: 150 },
     approachPosition: { x: 175, y: 275 },
     tooltipOffset: { x: 20, y: -50 },
     driftDuration: 4.2,
   },
   TRUCK_07: {
-    idlePosition: { x: 120, y: 230 },
     approachPosition: { x: 210, y: 268 },
     tooltipOffset: { x: 20, y: -50 },
     driftDuration: 5.1,
   },
   TRUCK_12: {
-    idlePosition: { x: 330, y: 145 },
     approachPosition: { x: 265, y: 280 },
     tooltipOffset: { x: -110, y: -50 },
     driftDuration: 3.6,
   },
   TRUCK_15: {
-    idlePosition: { x: 390, y: 230 },
     approachPosition: { x: 300, y: 272 },
     tooltipOffset: { x: -110, y: -50 },
     driftDuration: 4.8,
   },
   TRUCK_03: {
-    idlePosition: { x: 75, y: 80 },
     approachPosition: { x: 190, y: 260 },
     tooltipOffset: { x: 20, y: -50 },
     driftDuration: 5.5,
@@ -62,7 +66,6 @@ const BAY_POSITIONS = {
 }
 
 const FALLBACK_PATH = {
-  idlePosition: { x: 50, y: 50 },
   approachPosition: { x: 50, y: 50 },
   tooltipOffset: { x: 20, y: -50 },
   driftDuration: 4,
@@ -117,8 +120,12 @@ function latestReasoningForTruck(powerBids, truckId, maxLen = 38) {
 
 function resolveTruckPosition(truck, baysRows) {
   const path = getTruckPath(truck.name)
-  const status = (truck.status ?? 'idle').toLowerCase()
+  const status = effectiveMapStatus(truck, baysRows)
+  const idle = getIdleCenterForTruck(truck.name)
 
+  if (status === 'at_port') {
+    return { x: EXIT_RIGHT_X, y: idle.y }
+  }
   if (status === 'charging') {
     const bay = (baysRows ?? []).find((b) => b.id === truck.bay_id)
     const bayName = bay?.name
@@ -126,12 +133,12 @@ function resolveTruckPosition(truck, baysRows) {
       const p = BAY_POSITIONS[bayName]
       return { x: p.cx, y: p.cy }
     }
-    return path.idlePosition
+    return { x: idle.x, y: idle.y }
   }
   if (status === 'bidding') {
     return path.approachPosition
   }
-  return path.idlePosition
+  return { x: idle.x, y: idle.y }
 }
 
 function nodeColors(status) {
@@ -139,6 +146,7 @@ function nodeColors(status) {
   if (s === 'idle') return { fill: '#00ff88', stroke: '#00ff88' }
   if (s === 'bidding') return { fill: '#00aaff', stroke: '#00aaff' }
   if (s === 'charging') return { fill: '#ffaa00', stroke: '#ffaa00' }
+  if (s === 'at_port') return { fill: '#6a8aaa', stroke: '#88aacc' }
   if (s === 'done') return { fill: '#3a5a6a', stroke: '#3a5a6a' }
   return { fill: '#00ff88', stroke: '#00ff88' }
 }
@@ -162,13 +170,23 @@ const svgStyles = `
   }
 `
 
-function TruckNode({ truck, baysRows, powerBids }) {
+function TruckNode({ truck, baysRows, powerBids, respawnEpoch = 0 }) {
+  const status = effectiveMapStatus(truck, baysRows)
+  const idleCenter = getIdleCenterForTruck(truck.name)
   const target = resolveTruckPosition(truck, baysRows)
-  const pos = useSmoothPosition(target.x, target.y, 1400)
+  const moveMs =
+    respawnEpoch > 0 ? 2000 : status === 'at_port' ? 2200 : 1500
+  const pos = useSmoothPosition(
+    target.x,
+    target.y,
+    moveMs,
+    respawnEpoch,
+    respawnEpoch > 0 ? SPAWN_LEFT_X : null,
+    respawnEpoch > 0 ? idleCenter.y : null
+  )
   const path = getTruckPath(truck.name)
   const off = path.tooltipOffset
-  const status = (truck.status ?? 'idle').toLowerCase()
-  const colors = nodeColors(truck.status)
+  const colors = nodeColors(status)
   const drift = `${path.driftDuration ?? 4}s`
   const reasoning = latestReasoningForTruck(
     powerBids,
@@ -180,6 +198,7 @@ function TruckNode({ truck, baysRows, powerBids }) {
   const ty = pos.y + off.y
   const tw = 100
   const th = 46
+  const socDisplay = useSmoothSoc(truck.state_of_charge ?? 0)
 
   return (
     <g>
@@ -242,11 +261,26 @@ function TruckNode({ truck, baysRows, powerBids }) {
         />
       )}
 
+      {status === 'at_port' && (
+        <circle
+          cx={pos.x}
+          cy={pos.y}
+          r="5"
+          fill="#88aacc"
+          opacity="0.85"
+          style={{
+            transformBox: 'fill-box',
+            transformOrigin: 'center',
+            animation: 'drift 3s ease-in-out infinite',
+          }}
+        />
+      )}
+
       {status === 'done' && (
         <circle cx={pos.x} cy={pos.y} r="6" fill="#3a5a6a" />
       )}
 
-      {!['idle', 'bidding', 'charging', 'done'].includes(status) && (
+      {!['idle', 'bidding', 'charging', 'at_port', 'done'].includes(status) && (
         <circle
           cx={pos.x}
           cy={pos.y}
@@ -292,11 +326,11 @@ function TruckNode({ truck, baysRows, powerBids }) {
       <text
         x={tx + 6}
         y={ty + 26}
-        fill={socBarFill(truck.state_of_charge)}
+        fill={socBarFill(socDisplay)}
         fontSize="8"
         fontFamily="Courier New, monospace"
       >
-        {socBarText(truck.state_of_charge)}
+        {socBarText(socDisplay)}
       </text>
       <text
         x={tx + tw - 6}
@@ -306,7 +340,7 @@ function TruckNode({ truck, baysRows, powerBids }) {
         fontSize="7"
         fontFamily="Courier New, monospace"
       >
-        {formatSocPercent(truck.state_of_charge)}
+        {formatSocPercent(socDisplay)}
       </text>
       <text
         x={tx + 6}
@@ -327,6 +361,32 @@ export default function TerminalMap({ powerBids, style, demo }) {
 
   const trucks = demo ? [demo.truck] : trucksDb
   const baysRows = demo ? demo.bays : baysDb
+
+  const [respawnEpoch, setRespawnEpoch] = useState({})
+  const prevStatusRef = useRef({})
+
+  useEffect(() => {
+    for (const t of trucks ?? []) {
+      const st = effectiveMapStatus(t, baysRows)
+      const id = t.id
+      const was = prevStatusRef.current[id]
+      if (was === 'at_port' && st === 'idle') {
+        setRespawnEpoch((r) => ({ ...r, [id]: (r[id] ?? 0) + 1 }))
+      }
+      prevStatusRef.current[id] = st
+    }
+  }, [trucks, baysRows])
+
+  const idlePierLit = new Set(
+    (trucks ?? [])
+      .filter((t) => effectiveMapStatus(t, baysRows) === 'idle')
+      .map((t) => getIdleCenterForTruck(t.name).pierId)
+  )
+
+  // Hide trucks at 100% / departed (at_port) — next tick they reset as a “new” inbound unit.
+  const mapTrucks = (trucks ?? []).filter(
+    (t) => effectiveMapStatus(t, baysRows) !== 'at_port'
+  )
 
   return (
     <div
@@ -385,37 +445,40 @@ export default function TerminalMap({ powerBids, style, demo }) {
         >
           PIER T
         </text>
-        {[
-          { id: 'Y1', x: 30, y: 42 },
-          { id: 'Y2', x: 80, y: 42 },
-          { id: 'Y3', x: 130, y: 42 },
-          { id: 'Y4', x: 30, y: 84 },
-          { id: 'Y5', x: 80, y: 84 },
-          { id: 'Y6', x: 130, y: 84 },
-        ].map((y) => (
-          <g key={y.id}>
-            <rect
-              x={y.x}
-              y={y.y}
-              width="40"
-              height="30"
-              fill="#0a1525"
-              stroke="#1a3a5c"
-              strokeWidth="0.5"
-              rx="2"
-            />
-            <text
-              x={y.x + 20}
-              y={y.y + 19}
-              textAnchor="middle"
-              fill="#2a5a8a"
-              fontSize="8"
-              fontFamily="Courier New, monospace"
-            >
-              {y.id}
-            </text>
-          </g>
-        ))}
+        {PIER_BOXES.filter((b) => b.x < 200).map((box) => {
+          const lit = idlePierLit.has(box.id)
+          return (
+            <g key={box.id}>
+              <rect
+                x={box.x}
+                y={box.y}
+                width={box.w}
+                height={box.h}
+                fill={lit ? '#2a2210' : '#0a1525'}
+                stroke={lit ? '#ffcc00' : '#1a3a5c'}
+                strokeWidth={lit ? 1.8 : 0.5}
+                rx="2"
+                style={
+                  lit
+                    ? {
+                        filter: 'drop-shadow(0 0 6px rgba(255, 204, 0, 0.45))',
+                      }
+                    : undefined
+                }
+              />
+              <text
+                x={box.x + box.w / 2}
+                y={box.y + 19}
+                textAnchor="middle"
+                fill={lit ? '#ffdd66' : '#2a5a8a'}
+                fontSize="8"
+                fontFamily="Courier New, monospace"
+              >
+                {box.id}
+              </text>
+            </g>
+          )
+        })}
 
         <rect
           x="260"
@@ -437,36 +500,40 @@ export default function TerminalMap({ powerBids, style, demo }) {
         >
           PIER E
         </text>
-        {[
-          { id: 'Y7', x: 270, y: 42 },
-          { id: 'Y8', x: 320, y: 42 },
-          { id: 'Y9', x: 370, y: 42 },
-          { id: 'Y10', x: 270, y: 84 },
-          { id: 'Y11', x: 320, y: 84 },
-        ].map((y) => (
-          <g key={y.id}>
-            <rect
-              x={y.x}
-              y={y.y}
-              width="40"
-              height="30"
-              fill="#0a1525"
-              stroke="#1a3a5c"
-              strokeWidth="0.5"
-              rx="2"
-            />
-            <text
-              x={y.x + 20}
-              y={y.y + 19}
-              textAnchor="middle"
-              fill="#2a5a8a"
-              fontSize="8"
-              fontFamily="Courier New, monospace"
-            >
-              {y.id}
-            </text>
-          </g>
-        ))}
+        {PIER_BOXES.filter((b) => b.x >= 200).map((box) => {
+          const lit = idlePierLit.has(box.id)
+          return (
+            <g key={box.id}>
+              <rect
+                x={box.x}
+                y={box.y}
+                width={box.w}
+                height={box.h}
+                fill={lit ? '#2a2210' : '#0a1525'}
+                stroke={lit ? '#ffcc00' : '#1a3a5c'}
+                strokeWidth={lit ? 1.8 : 0.5}
+                rx="2"
+                style={
+                  lit
+                    ? {
+                        filter: 'drop-shadow(0 0 6px rgba(255, 204, 0, 0.45))',
+                      }
+                    : undefined
+                }
+              />
+              <text
+                x={box.x + box.w / 2}
+                y={box.y + 19}
+                textAnchor="middle"
+                fill={lit ? '#ffdd66' : '#2a5a8a'}
+                fontSize="8"
+                fontFamily="Courier New, monospace"
+              >
+                {box.id}
+              </text>
+            </g>
+          )
+        })}
 
         <line
           x1="120"
@@ -543,11 +610,13 @@ export default function TerminalMap({ powerBids, style, demo }) {
           const name = bay.name
           const br = BAY_RECTS[name]
           if (!br) return null
-          const isAvail = (bay.status ?? '').toLowerCase() === 'available'
+          const activeCharge = bayIsActivelyCharging(bay, trucks)
+          const isAvail = (bay.status ?? '').toLowerCase() === 'available' || !activeCharge
           const assigned = bay.assigned_truck_id
             ? [...(trucks ?? [])].find((t) => t.id === bay.assigned_truck_id)
             : null
-          const truckLabel = assigned?.name ?? ''
+          const truckLabel =
+            activeCharge && assigned?.name ? assigned.name : ''
 
           if (isAvail) {
             return (
@@ -637,12 +706,13 @@ export default function TerminalMap({ powerBids, style, demo }) {
           )
         })}
 
-        {(trucks ?? []).map((truck) => (
+        {mapTrucks.map((truck) => (
           <TruckNode
             key={truck.id}
             truck={truck}
             baysRows={baysRows}
             powerBids={powerBids}
+            respawnEpoch={respawnEpoch[truck.id] ?? 0}
           />
         ))}
       </svg>

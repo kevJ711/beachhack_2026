@@ -1,9 +1,24 @@
 from uagents import Agent, Context, Bureau
 from shared.models import GridSignal, PowerBid, BidResponse
+from shared.supabase_client import supabase
 from agents.trucks.bidding import decide_bid
 from datetime import datetime
 
 TERMINAL_ADDRESS = "agent1q2dsyxc0g3482s3cewzss6vf4gakd2r8znask0gpmqrnvm0p5n0fy9gsulk"
+
+
+def _soc_from_hub(truck_name: str, fallback: float) -> float:
+    """Match Supabase `trucks.state_of_charge` (terminal updates while charging)."""
+    r = (
+        supabase.table("trucks")
+        .select("state_of_charge")
+        .eq("name", truck_name)
+        .limit(1)
+        .execute()
+    )
+    if r.data:
+        return float(r.data[0]["state_of_charge"])
+    return fallback
 
 
 def stress_label(stress: float) -> str:
@@ -28,6 +43,8 @@ ups_battery = 80.0
 
 @truck1.on_message(model=GridSignal)
 async def amazon_on_grid(ctx: Context, sender: str, signal: GridSignal):
+    global amazon_battery
+    amazon_battery = _soc_from_hub("amazon_truck", amazon_battery)
     result = decide_bid(amazon_battery, signal.current_price, stress_label(signal.grid_stress))
     bid = PowerBid(
         truck_id="amazon_truck",
@@ -44,8 +61,10 @@ async def amazon_on_grid(ctx: Context, sender: str, signal: GridSignal):
 async def amazon_on_response(ctx: Context, sender: str, response: BidResponse):
     global amazon_battery
     if response.accepted:
-        amazon_battery = min(100.0, amazon_battery + 30.0)
-        ctx.logger.info(f"Amazon: accepted! Bay {response.bay}, battery now {amazon_battery}%")
+        amazon_battery = _soc_from_hub("amazon_truck", amazon_battery)
+        ctx.logger.info(
+            f"Amazon: charging at bay {response.bay} — SOC {amazon_battery:.0f}% (hub)"
+        )
     else:
         ctx.logger.info(f"Amazon: rejected, queue position {response.queue_position}")
 
@@ -54,6 +73,8 @@ async def amazon_on_response(ctx: Context, sender: str, response: BidResponse):
 
 @truck2.on_message(model=GridSignal)
 async def fedex_on_grid(ctx: Context, sender: str, signal: GridSignal):
+    global fedex_battery
+    fedex_battery = _soc_from_hub("fedex_truck", fedex_battery)
     result = decide_bid(fedex_battery, signal.current_price, stress_label(signal.grid_stress))
     bid = PowerBid(
         truck_id="fedex_truck",
@@ -70,8 +91,10 @@ async def fedex_on_grid(ctx: Context, sender: str, signal: GridSignal):
 async def fedex_on_response(ctx: Context, sender: str, response: BidResponse):
     global fedex_battery
     if response.accepted:
-        fedex_battery = min(100.0, fedex_battery + 30.0)
-        ctx.logger.info(f"FedEx: accepted! Bay {response.bay}, battery now {fedex_battery}%")
+        fedex_battery = _soc_from_hub("fedex_truck", fedex_battery)
+        ctx.logger.info(
+            f"FedEx: charging at bay {response.bay} — SOC {fedex_battery:.0f}% (hub)"
+        )
     else:
         ctx.logger.info(f"FedEx: rejected, queue position {response.queue_position}")
 
@@ -80,6 +103,8 @@ async def fedex_on_response(ctx: Context, sender: str, response: BidResponse):
 
 @truck3.on_message(model=GridSignal)
 async def ups_on_grid(ctx: Context, sender: str, signal: GridSignal):
+    global ups_battery
+    ups_battery = _soc_from_hub("ups_truck", ups_battery)
     result = decide_bid(ups_battery, signal.current_price, stress_label(signal.grid_stress))
     bid = PowerBid(
         truck_id="ups_truck",
@@ -96,8 +121,10 @@ async def ups_on_grid(ctx: Context, sender: str, signal: GridSignal):
 async def ups_on_response(ctx: Context, sender: str, response: BidResponse):
     global ups_battery
     if response.accepted:
-        ups_battery = min(100.0, ups_battery + 30.0)
-        ctx.logger.info(f"UPS: accepted! Bay {response.bay}, battery now {ups_battery}%")
+        ups_battery = _soc_from_hub("ups_truck", ups_battery)
+        ctx.logger.info(
+            f"UPS: charging at bay {response.bay} — SOC {ups_battery:.0f}% (hub)"
+        )
     else:
         ctx.logger.info(f"UPS: rejected, queue position {response.queue_position}")
 

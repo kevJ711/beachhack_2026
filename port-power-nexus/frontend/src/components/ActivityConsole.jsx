@@ -13,11 +13,16 @@ const styles = `
 
 function lineColor(type) {
   switch (type) {
-    case 'bid':     return '#00aaff'
-    case 'win':     return '#00ff88'
-    case 'signal':  return '#aa88ff'
-    case 'payment': return '#ffaa00'
-    default:        return '#c8d4e8'
+    case 'bid':            return '#00aaff'
+    case 'win':            return '#00ff88'
+    case 'signal':         return '#aa88ff'
+    case 'payment':        return '#ffaa00'
+    case 'auction_start':  return '#66ccff'
+    case 'charge_complete': return '#ffcc66'
+    case 'truck_reset':    return '#88ddaa'
+    case 'conversation':
+    case 'chat':           return '#c8b8ff'
+    default:               return '#c8d4e8'
   }
 }
 
@@ -25,7 +30,7 @@ export default function ActivityConsole() {
   const { rows } = useRealtimeTable('events', {
     orderBy: 'created_at',
     orderAscending: false,
-    limit: 40,
+    limit: 100,
   })
 
   const scrollRef = useRef(null)
@@ -87,6 +92,7 @@ export default function ActivityConsole() {
                 fontFamily: 'Courier New, monospace',
                 color: lineColor(event.type),
                 animation: 'fadeIn 0.4s ease-in',
+                wordBreak: 'break-word',
               }}
             >
               [{t}] {type}: {event.message}

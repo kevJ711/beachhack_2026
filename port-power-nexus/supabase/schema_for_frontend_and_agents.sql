@@ -113,6 +113,16 @@ create policy "anon_select_power_bids" on public.power_bids for select to anon u
 create policy "anon_select_bid_responses" on public.bid_responses for select to anon using (true);
 create policy "anon_select_events" on public.events for select to anon using (true);
 
+-- Agents may auto-create truck rows if seed was not applied (see agents/terminal/bay_manager.py)
+drop policy if exists "anon_insert_trucks" on public.trucks;
+create policy "anon_insert_trucks" on public.trucks for insert to anon with check (true);
+
+-- Terminal agent seeds bays and runs lock_bay (update) — required when using anon key
+drop policy if exists "anon_insert_bays" on public.bays;
+drop policy if exists "anon_update_bays" on public.bays;
+create policy "anon_insert_bays" on public.bays for insert to anon with check (true);
+create policy "anon_update_bays" on public.bays for update to anon using (true) with check (true);
+
 -- ---------------------------------------------------------------------------
 -- Seed bays (map expects A1, A2, B1, B2)
 -- ---------------------------------------------------------------------------

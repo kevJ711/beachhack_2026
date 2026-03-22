@@ -1,7 +1,16 @@
 from uagents import Agent, Context
+
 from shared.models import PowerBid, BidResponse
 from agents.terminal.bay_manager import (
-    get_available_bay, lock_bay, save_bid, save_bid_response, update_truck_status, log_event
+    DEMO_CHARGE_TICK_S,
+    finalize_trucks_after_port,
+    get_available_bay,
+    lock_bay,
+    log_event,
+    save_bid,
+    save_bid_response,
+    tick_charging_sessions,
+    update_truck_status,
 )
 
 terminal = Agent(name="terminal", seed="terminal_seed", port=8010, endpoint=["http://localhost:8010/submit"])
@@ -13,7 +22,13 @@ bid_queue = []
 @terminal.on_message(model=PowerBid)
 async def handle_bid(ctx: Context, sender: str, bid: PowerBid):
     ctx.logger.info(f"Terminal received bid from {bid.truck_id}: ${bid.bid_price}/kWh")
-    log_event("bid", f"{bid.truck_id} → terminal: PowerBid ${bid.bid_price:.2f}/kWh | battery={bid.battery_level}% | {bid.reasoning[:80]}")
+    reason = (bid.reasoning or "").strip().replace("\n", " ")
+    if len(reason) > 220:
+        reason = reason[:217] + "..."
+    log_event(
+        "bid",
+        f"BID {bid.truck_id} ${bid.bid_price:.2f}/kWh · batt {bid.battery_level:.0f}% · {reason}",
+    )
 
     # Save bid to Supabase
     bid_id = save_bid(
@@ -37,7 +52,12 @@ async def handle_bid(ctx: Context, sender: str, bid: PowerBid):
 
         if locked:
             # Winner — bay secured
-            update_truck_status(bid.truck_id, "charging", bay["id"])
+            update_truck_status(
+                bid.truck_id,
+                "charging",
+                bay["id"],
+                state_of_charge=int(bid.battery_level),
+            )
             save_bid_response(bid_id, True, bay["id"], bid.bid_price, queue_position)
 
             response = BidResponse(
@@ -49,12 +69,14 @@ async def handle_bid(ctx: Context, sender: str, bid: PowerBid):
             ctx.logger.info(f"Terminal: {bid.truck_id} won bay {bay['name']}")
             log_event("win", f"terminal → {bid.truck_id}: ACCEPTED bay={bay['name']} at ${bid.bid_price:.2f}/kWh")
 
-            # Ledger transaction — pay for the charging slot
+            # Ledger transaction — optional demo (needs funded testnet wallet)
             try:
                 await ctx.ledger.send_tokens(
-                    destination=terminal.address,
-                    amount=int(bid.bid_price * 100),  # convert to uFET
-                    denom="atestfet"
+                    destination=terminal.wallet.address(),
+                    amount=int(bid.bid_price * 100),  # uFET scale
+                    denom="atestfet",
+                    sender=terminal.wallet,
+                    memo=f"charge-{bid.truck_id}-{bay['name']}",
                 )
                 ctx.logger.info(f"Terminal: ledger tx sent for {bid.truck_id}")
             except Exception as e:
@@ -83,6 +105,15 @@ async def handle_bid(ctx: Context, sender: str, bid: PowerBid):
         log_event("bid", f"terminal → {bid.truck_id}: REJECTED — no bays available")
 
     await ctx.send(sender, response)
+
+
+@terminal.on_interval(period=DEMO_CHARGE_TICK_S)
+async def demo_charging_tick(ctx: Context) -> None:
+    try:
+        tick_charging_sessions()
+        finalize_trucks_after_port()
+    except Exception as e:
+        ctx.logger.warning(f"Terminal: charging tick failed — {e}")
 
 
 if __name__ == "__main__":

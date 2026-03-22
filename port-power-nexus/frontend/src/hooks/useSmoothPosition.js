@@ -5,16 +5,38 @@ function easeInOutQuad(t) {
 }
 
 /**
- * Animates (x,y) toward new targets when tx/ty change — no teleporting.
+ * Animates (x,y) toward (tx,ty).
+ * When `resetEpoch` increases, optionally starts from `(fromX, fromY)` (e.g. spawn off-screen left).
  */
-export default function useSmoothPosition(tx, ty, durationMs = 1400) {
+export default function useSmoothPosition(
+  tx,
+  ty,
+  durationMs = 1400,
+  resetEpoch = 0,
+  fromX = null,
+  fromY = null
+) {
   const [pos, setPos] = useState({ x: tx, y: ty })
   const posRef = useRef({ x: tx, y: ty })
   const rafRef = useRef(null)
+  const lastResetEpoch = useRef(0)
 
   useEffect(() => {
     const to = { x: tx, y: ty }
-    const from = posRef.current
+    let from = posRef.current
+
+    if (
+      resetEpoch > 0 &&
+      resetEpoch !== lastResetEpoch.current &&
+      fromX != null &&
+      fromY != null
+    ) {
+      lastResetEpoch.current = resetEpoch
+      from = { x: fromX, y: fromY }
+      posRef.current = from
+      setPos(from)
+    }
+
     const close =
       Math.abs(from.x - to.x) < 0.05 && Math.abs(from.y - to.y) < 0.05
     if (close) {
@@ -50,7 +72,7 @@ export default function useSmoothPosition(tx, ty, durationMs = 1400) {
         rafRef.current = null
       }
     }
-  }, [tx, ty, durationMs])
+  }, [tx, ty, durationMs, resetEpoch, fromX, fromY])
 
   return pos
 }
