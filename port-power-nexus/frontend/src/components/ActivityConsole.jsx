@@ -13,16 +13,11 @@ const styles = `
 
 function lineColor(type) {
   switch (type) {
-    case 'bid':
-      return '#00aaff'
-    case 'win':
-      return '#00ff88'
-    case 'payment':
-      return '#ffaa00'
-    case 'auction_start':
-      return '#c8d4e8'
-    default:
-      return '#c8d4e8'
+    case 'bid':     return '#00aaff'
+    case 'win':     return '#00ff88'
+    case 'signal':  return '#aa88ff'
+    case 'payment': return '#ffaa00'
+    default:        return '#c8d4e8'
   }
 }
 
@@ -48,7 +43,7 @@ export default function ActivityConsole() {
     <section
       style={{
         flexShrink: 0,
-        height: 90,
+        height: 180,
         background: '#050810',
         borderTop: '1px solid #1a3a5c',
         overflow: 'hidden',
@@ -73,7 +68,7 @@ export default function ActivityConsole() {
       <div
         ref={scrollRef}
         style={{
-          height: 66,
+          height: 150,
           overflowY: 'auto',
           padding: '0 12px 4px',
         }}
