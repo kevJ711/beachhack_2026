@@ -1,9 +1,14 @@
 import openai
 import os
 import json
+from dotenv import load_dotenv
 import shared.env_loader  # noqa: F401 — repo root .env
 
+load_dotenv()
+
 openai.api_key = os.getenv("OPENAI_API_KEY")
+
+_FALLBACK_BID = {"bid_price": 0.20, "reasoning": "Fallback bid — AI unavailable."}
 
 def decide_bid(battery_level, price, grid_stress):
     prompt = f"""You are an intelligent energy bidding agent managing a zero-emission electric truck operating at a logistics hub (such as a port, warehouse, or freight terminal).
@@ -36,10 +41,13 @@ Based on all of the above, decide:
 Return ONLY a JSON object with exactly these two fields:
 - "bid_price": float (your bid in $/kWh)
 - "reasoning": string (your explanation, 2-3 sentences)"""
-    response = openai.chat.completions.create(
-        model="gpt-4o-mini",
-        response_format={"type": "json_object"},
-        messages=[{"role": "user", "content": prompt}]
-    )
-
-    return json.loads(response.choices[0].message.content) #parses and returns
+    try:
+        response = openai.chat.completions.create(
+            model="gpt-4o-mini",
+            response_format={"type": "json_object"},
+            messages=[{"role": "user", "content": prompt}],
+            timeout=10,
+        )
+        return json.loads(response.choices[0].message.content)
+    except Exception:
+        return _FALLBACK_BID
