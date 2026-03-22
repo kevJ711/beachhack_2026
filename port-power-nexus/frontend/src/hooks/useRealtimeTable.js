@@ -1,12 +1,23 @@
 import { useEffect, useRef, useState } from 'react'
 import supabase from '../lib/supabase'
 
+const EMPTY_REFETCH_ON = []
+
+/**
+ * Use with `refetchOnChanges` when another table must refresh because `events` updated.
+ * Do not use `filter: type=eq.auction_end` — filtered Realtime INSERT is flaky; Activity
+ * uses an unfiltered `events` subscription and updates while TopBar did not.
+ */
+export const REFETCH_ON_EVENTS_INSERT = [
+  { table: 'events', event: 'INSERT' },
+]
+
 /**
  * Subscribes to Supabase Realtime `postgres_changes` for `tableName`, plus an initial REST load.
+ * On each change, re-runs the same query (debounced) so limit/orderBy stay correct.
  *
- * If the UI never updates until you refresh: enable Realtime for this table in the Supabase
- * project and ensure the `anon` role can SELECT rows (RLS). Optional polling: set
- * `pollIntervalMs` or `VITE_SUPABASE_POLL_MS` (>0).
+ * No interval polling — updates rely on Realtime. If the UI is stale, enable Realtime for
+ * this table (Supabase → Database → Replication) and ensure anon can SELECT (RLS).
  *
  * @param {string} tableName
  * @param {{
@@ -15,9 +26,10 @@ import supabase from '../lib/supabase'
  *   orderBy?: string
  *   orderAscending?: boolean
  *   limit?: number
- *   pollIntervalMs?: number
+ *   refetchOnChanges?: Array<{ table: string; event?: 'INSERT' | 'UPDATE' | 'DELETE' | '*'; filter?: string }>
  * }} [options]
- * `pollIntervalMs`: full re-fetch every N ms (0 = off). Default off; env `VITE_SUPABASE_POLL_MS` to opt in.
+ * `refetchOnChanges`: extra tables to listen to (e.g. `events` INSERT with filter) so this query
+ * refetches when related rows change — useful when UPDATE replication is flaky.
  */
 export default function useRealtimeTable(tableName, options = {}) {
   const filterColumn = options.filterColumn
@@ -25,12 +37,7 @@ export default function useRealtimeTable(tableName, options = {}) {
   const orderBy = options.orderBy
   const orderAscending = options.orderAscending ?? false
   const limit = options.limit
-  const envPoll = import.meta.env.VITE_SUPABASE_POLL_MS
-  const pollIntervalMs =
-    options.pollIntervalMs ??
-    (envPoll != null && String(envPoll).trim() !== ''
-      ? Math.max(0, parseInt(String(envPoll), 10) || 0)
-      : 0)
+  const refetchOnChanges = options.refetchOnChanges ?? EMPTY_REFETCH_ON
 
   const channelNameRef = useRef(
     `realtime-${tableName}-${Date.now()}`
@@ -80,50 +87,52 @@ export default function useRealtimeTable(tableName, options = {}) {
 
     fetchInitial()
 
-    let pollTimer = null
-    if (pollIntervalMs > 0) {
-      pollTimer = setInterval(() => {
+    let debounceRefetch = null
+    const scheduleRefetch = () => {
+      if (debounceRefetch) clearTimeout(debounceRefetch)
+      debounceRefetch = setTimeout(() => {
+        debounceRefetch = null
         if (!cancelled) fetchInitial()
-      }, pollIntervalMs)
+      }, 120)
     }
 
-    const ch = supabase
-      .channel(channelNameRef.current)
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: tableName },
-        (payload) => {
-          if (payload.eventType === 'DELETE') {
-            const oldRow = payload.old
-            if (!oldRow || oldRow.id == null) return
-            setRows((prev) => prev.filter((r) => r.id !== oldRow.id))
-            setLastUpdated(Date.now())
-            return
-          }
-          if (payload.eventType !== 'INSERT' && payload.eventType !== 'UPDATE') {
-            return
-          }
-          const row = payload.new
-          if (!row || row.id == null) return
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible' && !cancelled) fetchInitial()
+    }
+    document.addEventListener('visibilitychange', onVisibility)
 
-          setRows((prev) => {
-            const idx = prev.findIndex((r) => r.id === row.id)
-            if (idx >= 0) {
-              const next = [...prev]
-              next[idx] = row
-              return next
-            }
-            return [...prev, row]
-          })
-          setLastUpdated(Date.now())
+    const ch = supabase.channel(channelNameRef.current)
+
+    ch.on(
+      'postgres_changes',
+      { event: '*', schema: 'public', table: tableName },
+      () => {
+        scheduleRefetch()
+      }
+    )
+
+    for (const extra of refetchOnChanges) {
+      const ev = extra.event ?? '*'
+      const payload = {
+        event: ev,
+        schema: 'public',
+        table: extra.table,
+      }
+      if (extra.filter) payload.filter = extra.filter
+      ch.on('postgres_changes', payload, () => scheduleRefetch())
+    }
+
+    ch.subscribe((status, err) => {
+        if (status === 'SUBSCRIBED') {
+          if (import.meta.env.DEV) {
+            console.info(`[useRealtimeTable:${tableName}] Realtime subscribed`)
+          }
         }
-      )
-      .subscribe((status, err) => {
         if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
           console.warn(
             `[useRealtimeTable:${tableName}] Realtime ${status}:`,
             err?.message ?? err,
-            '— enable this table for Realtime in Supabase, or set VITE_SUPABASE_POLL_MS for REST polling.'
+            '— enable this table for Realtime in Supabase (Replication).'
           )
         }
       })
@@ -132,7 +141,8 @@ export default function useRealtimeTable(tableName, options = {}) {
 
     return () => {
       cancelled = true
-      if (pollTimer) clearInterval(pollTimer)
+      document.removeEventListener('visibilitychange', onVisibility)
+      if (debounceRefetch) clearTimeout(debounceRefetch)
       if (channelRef.current) {
         supabase.removeChannel(channelRef.current)
         channelRef.current = null
@@ -145,7 +155,7 @@ export default function useRealtimeTable(tableName, options = {}) {
     orderBy,
     orderAscending,
     limit,
-    pollIntervalMs,
+    refetchOnChanges,
   ])
 
   return { rows, lastUpdated }

@@ -14,7 +14,7 @@ export default function useSmoothSoc(targetSoc) {
 
   useEffect(() => {
     let cancelled = false
-    const alpha = 0.075
+    const alpha = 0.08
 
     function tick() {
       if (cancelled) return

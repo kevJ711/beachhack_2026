@@ -1,4 +1,4 @@
-import useRealtimeTable from '../hooks/useRealtimeTable'
+import useRealtimeTable, { REFETCH_ON_EVENTS_INSERT } from '../hooks/useRealtimeTable'
 import useSmoothSoc from '../hooks/useSmoothSoc'
 import { effectiveMapStatus } from '../lib/mapTruckStatus'
 import { formatSocPercent, normalizeSoc } from '../lib/truckDisplay'
@@ -64,12 +64,14 @@ export default function TruckLeaderboard({ demoTruck }) {
   const { rows: trucks } = useRealtimeTable('trucks', {
     orderBy: 'state_of_charge',
     orderAscending: true,
+    refetchOnChanges: REFETCH_ON_EVENTS_INSERT,
   })
-  const { rows: bays } = useRealtimeTable('bays')
+  const { rows: bays } = useRealtimeTable('bays', {
+    refetchOnChanges: REFETCH_ON_EVENTS_INSERT,
+  })
 
-  const displayTrucks = demoTruck
-    ? [demoTruck].filter((t) => effectiveMapStatus(t, []) !== 'at_port')
-    : (trucks ?? []).filter((t) => effectiveMapStatus(t, bays) !== 'at_port')
+  // Show every truck (incl. at_port / Pier E) so balances stay visible — do not filter by status.
+  const displayTrucks = demoTruck ? [demoTruck] : (trucks ?? [])
 
   return (
     <aside

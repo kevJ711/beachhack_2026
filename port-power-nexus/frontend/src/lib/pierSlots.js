@@ -27,6 +27,20 @@ export const TRUCK_HOME_PIER = {
   TRUCK_03: 'Y4',
 }
 
+/** Exit berth per truck on Pier E after charging completes (Y7–Y11). */
+export const TRUCK_EXIT_PIER = {
+  amazon_truck: 'Y7',
+  fedex_truck: 'Y8',
+  ups_truck: 'Y9',
+  dhl_truck: 'Y10',
+  rivian_truck: 'Y11',
+  TRUCK_01: 'Y7',
+  TRUCK_07: 'Y8',
+  TRUCK_12: 'Y9',
+  TRUCK_15: 'Y10',
+  TRUCK_03: 'Y11',
+}
+
 export function getPierBox(pierId) {
   return PIER_BOXES.find((p) => p.id === pierId) ?? PIER_BOXES[0]
 }
@@ -36,11 +50,18 @@ export function getPierCenterById(pierId) {
   return { x: b.x + b.w / 2, y: b.y + b.h / 2 }
 }
 
+/** After charging completes, trucks stage on Pier E (see TerminalMap). */
+export const EXIT_PIER_E_SLOT = 'Y10'
+
+export function getExitPierIdForTruck(truckName) {
+  return TRUCK_EXIT_PIER[truckName] ?? EXIT_PIER_E_SLOT
+}
+
+export function getExitPierECenter(truckName) {
+  return getPierCenterById(getExitPierIdForTruck(truckName))
+}
+
 export function getIdleCenterForTruck(truckName) {
   const pid = TRUCK_HOME_PIER[truckName] ?? 'Y1'
   return { ...getPierCenterById(pid), pierId: pid }
 }
-
-/** Off-screen X: exit right (full charge), spawn left (respawn) — Y matches pier row in resolve */
-export const EXIT_RIGHT_X = 540
-export const SPAWN_LEFT_X = -38

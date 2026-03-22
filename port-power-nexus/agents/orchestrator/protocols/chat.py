@@ -1,4 +1,3 @@
-import os
 import re
 import time
 from datetime import datetime
@@ -15,6 +14,7 @@ from uagents_core.contrib.protocols.chat import (
     chat_protocol_spec,
 )
 
+from shared.config import load_orchestrator_settings
 from shared.models import (
     AgentErrorResponse,
     AuctionStarted,
@@ -24,6 +24,7 @@ from shared.models import (
     TruckStatusResponse,
 )
 
+_ORCH = load_orchestrator_settings()
 
 chat_protocol = Protocol(spec=chat_protocol_spec)
 swarm_protocol = Protocol(name="port_power_swarm", version="0.1.0")
@@ -31,27 +32,10 @@ swarm_protocol = Protocol(name="port_power_swarm", version="0.1.0")
 IntentType = Literal["start_auction_for_truck", "get_truck_status", "unknown"]
 PENDING_INDEX_KEY = "pending_request_ids"
 
-GRID_AGENT_ADDRESS = os.getenv(
-    "GRID_AGENT_ADDRESS",
-    "agent1qdrkj8c6caq7tdmk04r3277ekaukfg7ztxncx0alpddflgz995k4xun8nut",
-)
-TERMINAL_AGENT_ADDRESS = os.getenv(
-    "TERMINAL_AGENT_ADDRESS",
-    "agent1q2dsyxc0g3482s3cewzss6vf4gakd2r8znask0gpmqrnvm0p5n0fy9gsulk",
-)
-TRUCK_STATUS_AGENT_ADDRESS = os.getenv(
-    "TRUCK_STATUS_AGENT_ADDRESS",
-    os.getenv(
-        "TERMINAL_AGENT_ADDRESS",
-        "agent1q2dsyxc0g3482s3cewzss6vf4gakd2r8znask0gpmqrnvm0p5n0fy9gsulk",
-    ),
-)
-ORCHESTRATOR_HELLO_TEXT = os.getenv(
-    "ORCHESTRATOR_HELLO_TEXT", "Hello from Port-Power Nexus"
-)
-ORCHESTRATOR_OUTBOUND_TIMEOUT_SECONDS = int(
-    os.getenv("ORCHESTRATOR_OUTBOUND_TIMEOUT_SECONDS", "20")
-)
+GRID_AGENT_ADDRESS = _ORCH.addresses.grid_agent
+TRUCK_STATUS_AGENT_ADDRESS = _ORCH.addresses.truck_status_agent
+ORCHESTRATOR_HELLO_TEXT = _ORCH.hello_text
+ORCHESTRATOR_OUTBOUND_TIMEOUT_SECONDS = _ORCH.outbound_timeout_seconds
 
 TRUCK_PATTERN = re.compile(r"\btruck[_\-\s]?(\d{1,2})\b", re.IGNORECASE)
 AUCTION_KEYWORDS = {"charge", "charging", "slot", "auction", "bid", "cleanest"}

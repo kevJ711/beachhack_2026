@@ -30,6 +30,7 @@ function lineColor(type, message) {
   if (type === 'bid') return '#00aaff'
   if (type === 'signal') return '#aa88ff'
   if (type === 'auction_start') return '#66ccff'
+  if (type === 'auction_end') return '#8899aa'
   if (type === 'charge_complete') return '#ffcc66'
   return '#4a6a8a'
 }

@@ -11,6 +11,7 @@ from uagents_core.types import DeliveryStatus
 
 from agents.orchestrator.protocols.chat import chat_protocol, swarm_protocol
 from shared.config import load_orchestrator_settings
+from shared.agent_net import submit_endpoint
 from shared.models import (
     AgentErrorResponse,
     AuctionStarted,
@@ -55,15 +56,42 @@ SETTINGS = load_orchestrator_settings()
 
 ORCHESTRATOR_PORT = int(os.environ.get("ORCHESTRATOR_PORT", "8002"))
 
+# Identity (agent1q…) comes from name + seed — NOT from ORCHESTRATOR_PORT. If ASI:One / Agentverse
+# still points at an old address, either restore ORCHESTRATOR_SEED to match or re-register the new
+# address from the startup log.
+ORCHESTRATOR_SEED = os.environ.get(
+    "ORCHESTRATOR_SEED",
+    "testestswatqqqqqqqqqqqqqqqqqtttto",
+)
+
+# `publish_manifest=True` is required for ASI:One / Agentverse protocol discovery; it can also
+# contact peer HTTP endpoints at startup → "dispenser" errors if trucks are offline. Default true
+# for ASI; set ORCHESTRATOR_PUBLISH_MANIFEST=false for local dev without the fleet.
+_ORCH_PUBLISH_MANIFEST = (
+    os.environ.get("ORCHESTRATOR_PUBLISH_MANIFEST", "true").strip().lower()
+    in ("1", "true", "yes")
+)
+
+# Mailbox: do NOT pass `endpoint=http://.../submit` together with `mailbox=True` — uAgents treats
+# a custom endpoint as overriding mailbox, so the MailboxClient never starts. Use mailbox-only
+# endpoints from Agentverse; the process still binds ORCHESTRATOR_PORT for the agent inspector.
+# Set ORCHESTRATOR_MAILBOX=false to use plain local /submit only (no Agentverse mailbox).
+_ORCH_MAILBOX = os.environ.get("ORCHESTRATOR_MAILBOX", "true").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+_orchestrator_endpoint = None if _ORCH_MAILBOX else submit_endpoint(ORCHESTRATOR_PORT)
+
 orchestrator_agent = Agent(
     name="Logistics_Orchestrator",
-    seed="logistics_orchestrator_seed_four",
-    
+    seed=ORCHESTRATOR_SEED,
     port=ORCHESTRATOR_PORT,
-    mailbox=True,
+    endpoint=_orchestrator_endpoint,
+    mailbox=_ORCH_MAILBOX,
 )
-orchestrator_agent.include(chat_protocol, publish_manifest=True)
-orchestrator_agent.include(swarm_protocol, publish_manifest=True)
+orchestrator_agent.include(chat_protocol, publish_manifest=_ORCH_PUBLISH_MANIFEST)
+orchestrator_agent.include(swarm_protocol, publish_manifest=_ORCH_PUBLISH_MANIFEST)
 
 
 def parse_command(message: str) -> ParsedCommand:
@@ -294,12 +322,12 @@ async def route_command(ctx: Context, sender: str, command: ParsedCommand) -> st
 async def startup(ctx: Context):
     ctx.logger.info(
         f"Orchestrator started address={ctx.agent.address} "
+        f"mailbox={_ORCH_MAILBOX} "
+        f"publish_manifest={_ORCH_PUBLISH_MANIFEST} "
         f"grid={SETTINGS.addresses.grid_agent} "
         f"terminal={SETTINGS.addresses.terminal_agent} "
         f"truck_status={SETTINGS.addresses.truck_status_agent} "
-        f"amazon={SETTINGS.addresses.amazon_truck_agent} "
-        f"fedex={SETTINGS.addresses.fedex_truck_agent} "
-        f"ups={SETTINGS.addresses.ups_truck_agent}"
+        f"fleet={list(SETTINGS.addresses.truck_agents)}"
     )
 
 

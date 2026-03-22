@@ -10,7 +10,7 @@ import TopBar from './components/TopBar'
 import TerminalMap from './components/TerminalMap'
 import TruckLeaderboard from './components/TruckLeaderboard'
 import ActivityConsole from './components/ActivityConsole'
-import useRealtimeTable from './hooks/useRealtimeTable'
+import useRealtimeTable, { REFETCH_ON_EVENTS_INSERT } from './hooks/useRealtimeTable'
 import useDemoStaticTruck, {
   DEMO_TRUCK_ID,
   DEMO_BAY_IDS,
@@ -24,12 +24,14 @@ export default function App() {
     orderBy: 'created_at',
     orderAscending: false,
     limit: 100,
+    refetchOnChanges: REFETCH_ON_EVENTS_INSERT,
   })
 
   const { rows: bidResponses } = useRealtimeTable('bid_responses', {
     orderBy: 'created_at',
     orderAscending: false,
     limit: 100,
+    refetchOnChanges: REFETCH_ON_EVENTS_INSERT,
   })
 
   const demo = useDemoStaticTruck()

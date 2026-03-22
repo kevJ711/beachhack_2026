@@ -6,11 +6,15 @@ from datetime import datetime, timezone
 
 from postgrest.exceptions import APIError
 
-# Demo: fast charging ramp + release bay when truck reaches port (see tick_charging_sessions)
-DEMO_CHARGE_TICK_S: float = float(os.environ.get("DEMO_CHARGE_TICK_S", "0.65"))
-DEMO_CHARGE_STEP_PCT: int = int(os.environ.get("DEMO_CHARGE_STEP_PCT", "34"))
-# After at_port, dwell then reset to idle so the map can cycle (exit animation + pier)
+# Demo: time-based charge over DEMO_CHARGE_SECONDS (smooth SOC in UI + DB)
+DEMO_CHARGE_SECONDS: float = float(os.environ.get("DEMO_CHARGE_SECONDS", "20"))
+DEMO_CHARGE_TICK_S: float = float(os.environ.get("DEMO_CHARGE_TICK_S", "0.5"))
+# After at_port, optional dwell then reset to idle/inbound (map moves to Pier T left).
 DEMO_AT_PORT_DWELL_S: float = float(os.environ.get("DEMO_AT_PORT_DWELL_S", "2.8"))
+# Default false: trucks stay `at_port` at 100% (map: Pier E right). Set true for demo loop / new inbound SOC.
+_RESET_TRUCKS_AFTER_PORT: bool = os.environ.get(
+    "DEMO_RESET_TRUCKS_AFTER_PORT", ""
+).strip().lower() in ("1", "true", "yes")
 
 # Matches agents/trucks/agent.py — used when DB was created without seed rows
 _TRUCK_DEFAULT_SOC = {"amazon_truck": 20, "fedex_truck": 55, "ups_truck": 80}
@@ -103,18 +107,34 @@ def lock_bay(bay_id: str, truck_name: str):
     return len(result.data) > 0
 
 
-def save_bid(truck_name: str, battery_level: float, requested_kwh: float, bid_price: float, reasoning: str):
+def save_bid(
+    truck_name: str,
+    battery_level: float,
+    requested_kwh: float,
+    bid_price: float,
+    reasoning: str,
+    auction_id: str | None = None,
+):
     """Insert a bid into power_bids. Returns the inserted row id."""
     truck_id = get_truck_id(truck_name)
 
-    result = supabase.table("power_bids").insert({
+    row = {
         "truck_id": truck_id,
         "battery_level": int(battery_level),
         "requested_kwh": requested_kwh,
         "bid_price": bid_price,
         "reasoning": reasoning,
-        "created_at": datetime.now(timezone.utc).isoformat()
-    }).execute()
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if auction_id:
+        row["auction_id"] = auction_id
+    try:
+        result = supabase.table("power_bids").insert(row).execute()
+    except APIError:
+        if "auction_id" not in row:
+            raise
+        row.pop("auction_id", None)
+        result = supabase.table("power_bids").insert(row).execute()
 
     return result.data[0]["id"] if result.data else None
 
@@ -136,6 +156,10 @@ def update_truck_status(
     status: str,
     bay_id: str | None = None,
     state_of_charge: int | None = None,
+    *,
+    charging_started_at: str | None = None,
+    charge_start_soc: int | None = None,
+    clear_charging_meta: bool = False,
 ):
     """Update the truck's status and bay assignment."""
     payload = {
@@ -145,6 +169,13 @@ def update_truck_status(
     }
     if state_of_charge is not None:
         payload["state_of_charge"] = state_of_charge
+    if charging_started_at is not None:
+        payload["charging_started_at"] = charging_started_at
+    if charge_start_soc is not None:
+        payload["charge_start_soc"] = charge_start_soc
+    if clear_charging_meta:
+        payload["charging_started_at"] = None
+        payload["charge_start_soc"] = None
     supabase.table("trucks").update(payload).eq("name", truck_name).execute()
 
 
@@ -159,21 +190,39 @@ def release_bay_for_truck(bay_id: str, truck_id: str) -> None:
 
 
 def tick_charging_sessions() -> None:
-    """Ramp SOC while status=charging; at 100% mark at_port, free the bay (demo loop)."""
+    """Ramp SOC linearly over DEMO_CHARGE_SECONDS using charging_started_at; then at_port + pier E in UI."""
     r = (
         supabase.table("trucks")
-        .select("id,name,state_of_charge,bay_id")
+        .select("id,name,state_of_charge,bay_id,charging_started_at,charge_start_soc")
         .eq("status", "charging")
         .execute()
     )
     rows = r.data or []
-    now = datetime.now(timezone.utc).isoformat()
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.isoformat()
     for row in rows:
         tid = row["id"]
         name = row["name"]
         bay_id = row.get("bay_id")
         soc = int(row["state_of_charge"])
-        new_soc = min(100, soc + DEMO_CHARGE_STEP_PCT)
+        start_ts = row.get("charging_started_at")
+        start_soc = row.get("charge_start_soc")
+
+        if start_ts and start_soc is not None:
+            started = _parse_last_updated(start_ts)
+            if started:
+                elapsed = max(0.0, (now_dt - started).total_seconds())
+                frac = min(1.0, elapsed / max(DEMO_CHARGE_SECONDS, 0.1))
+                base = int(start_soc)
+                new_soc = int(round(base + (100 - base) * frac))
+                new_soc = max(base, min(100, new_soc))
+            else:
+                new_soc = min(100, soc + 1)
+        else:
+            # Legacy row: treat as mid-charge, snap toward 100 over remaining fraction
+            frac = 0.05
+            new_soc = min(100, int(round(soc + (100 - soc) * frac)))
+
         if new_soc >= 100:
             if bay_id:
                 release_bay_for_truck(bay_id, tid)
@@ -183,16 +232,21 @@ def tick_charging_sessions() -> None:
                     "status": "at_port",
                     "distance_to_port": 0,
                     "bay_id": None,
+                    "charging_started_at": None,
+                    "charge_start_soc": None,
                     "last_updated": now,
                 }
             ).eq("id", tid).execute()
             log_event(
                 "charge_complete",
-                f"{name} @ 100% — departed yard (bay cleared)",
+                f"{name} @ 100% — roll to Pier E (bay cleared)",
             )
         else:
             supabase.table("trucks").update(
-                {"state_of_charge": new_soc, "last_updated": now}
+                {
+                    "state_of_charge": new_soc,
+                    "last_updated": now,
+                }
             ).eq("id", tid).execute()
 
 
@@ -206,7 +260,12 @@ def _parse_last_updated(s: str | None) -> datetime | None:
 
 
 def finalize_trucks_after_port() -> None:
-    """After DEMO_AT_PORT_DWELL_S at `at_port`, reset to idle pier (demo loop)."""
+    """After DEMO_AT_PORT_DWELL_S at `at_port`, optionally reset to idle pier (demo loop).
+
+    Skipped unless DEMO_RESET_TRUCKS_AFTER_PORT=true — otherwise fleet stays staged on Pier E.
+    """
+    if not _RESET_TRUCKS_AFTER_PORT:
+        return
     r = (
         supabase.table("trucks")
         .select("id,name,last_updated")
@@ -227,6 +286,8 @@ def finalize_trucks_after_port() -> None:
                 "state_of_charge": soc,
                 "distance_to_port": 10,
                 "bay_id": None,
+                "charging_started_at": None,
+                "charge_start_soc": None,
                 "last_updated": now.isoformat(),
             }
         ).eq("id", row["id"]).execute()

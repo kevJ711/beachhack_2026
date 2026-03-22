@@ -1,10 +1,18 @@
+import asyncio
 import os
 from datetime import datetime, timezone
 
 from uagents import Agent, Context
 
-from shared.models import DemoHeartbeat, PowerBid, BidResponse, TruckStatusRequest, TruckStatusResponse
-from shared.truck_mapping import truck_label_to_agent_name
+from shared.models import (
+    AuctionComplete,
+    BidResponse,
+    DemoHeartbeat,
+    PowerBid,
+    TruckStatusRequest,
+    TruckStatusResponse,
+)
+from shared.truck_mapping import fleet_index, truck_label_to_agent_name
 from shared.supabase_client import supabase
 from agents.terminal.bay_manager import (
     DEMO_CHARGE_TICK_S,
@@ -17,8 +25,22 @@ from agents.terminal.bay_manager import (
     tick_charging_sessions,
     update_truck_status,
 )
+from shared.agent_net import submit_endpoint
+from shared.config import truck_agent_addresses_tuple
+from shared.agent_wiring import swarm_wiring_log_line
 
-terminal = Agent(name="terminal", seed="terminal_seed")
+_terminal_port_raw = os.environ.get("TERMINAL_PORT", "").strip()
+if _terminal_port_raw:
+    _tp = int(_terminal_port_raw, 10)
+    terminal = Agent(
+        name="terminal",
+        seed="terminal_seed",
+        port=_tp,
+        endpoint=submit_endpoint(_tp),
+        mailbox=False,
+    )
+else:
+    terminal = Agent(name="terminal", seed="terminal_seed", mailbox=False)
 
 GRID_AGENT_ADDRESS = os.environ.get("GRID_AGENT_ADDRESS", "").strip()
 # Set e.g. DEMO_GRID_HEARTBEAT_S=60 and GRID_AGENT_ADDRESS to enable grid↔terminal pings.
@@ -28,6 +50,13 @@ DEMO_GRID_HEARTBEAT_S = float(os.environ.get("DEMO_GRID_HEARTBEAT_S", "0"))
 bid_queue = []
 # In-memory bay lock: bay_id -> truck_id (source of truth for this round)
 _locked_bays: dict[str, str] = {}
+# Prevent double settlement if Grid retries
+_completed_auctions: set[str] = set()
+
+_TRUCK_ADDRESSES: list[str] = list(truck_agent_addresses_tuple())
+_WINNER_STAGGER_S = float(os.environ.get("TERMINAL_WINNER_STAGGER_S", "1.75"))
+# How often terminal polls auction_state for completed auctions it hasn't settled yet
+_SETTLE_POLL_S = float(os.environ.get("TERMINAL_SETTLE_POLL_S", "2.0"))
 
 _KNOWN_FLEET_NAMES = frozenset(
     {"amazon_truck", "fedex_truck", "ups_truck", "dhl_truck", "rivian_truck"}
@@ -122,9 +151,197 @@ async def terminal_startup(ctx: Context):
     supabase.table("trucks").update({
         "status": "idle",
         "bay_id": None,
+        "charging_started_at": None,
+        "charge_start_soc": None,
     }).neq("id", "00000000-0000-0000-0000-000000000000").execute()
     _locked_bays.clear()
     ctx.logger.info("Terminal: bays and trucks reset on startup")
+    ctx.logger.info(f"Terminal: {swarm_wiring_log_line()}")
+
+
+def _active_auction_id() -> str | None:
+    r = (
+        supabase.table("auction_state")
+        .select("id")
+        .eq("status", "active")
+        .limit(1)
+        .execute()
+    )
+    if not r.data:
+        return None
+    return r.data[0]["id"]
+
+
+def _truck_agent_address(truck_name: str) -> str | None:
+    idx = fleet_index(truck_name)
+    if idx is None or idx >= len(_TRUCK_ADDRESSES):
+        return None
+    return _TRUCK_ADDRESSES[idx]
+
+
+async def settle_auction(ctx: Context, auction_id: str) -> None:
+    """After Grid ends the auction: rank bids, assign bays one-by-one, start 20s charge."""
+    global bid_queue
+    if auction_id in _completed_auctions:
+        ctx.logger.info(f"Terminal: settlement already ran for auction {auction_id}")
+        return
+
+    rows = (
+        supabase.table("power_bids")
+        .select("id, truck_id, bid_price, battery_level, created_at")
+        .eq("auction_id", auction_id)
+        .execute()
+    )
+    bids = rows.data or []
+
+    # Fallback: auction_id column may not exist yet (run 20250322_charging_auction_columns.sql).
+    # If no bids matched by auction_id but bid_queue has trucks, fetch their latest bids directly.
+    if not bids and bid_queue:
+        ctx.logger.warning(
+            f"Terminal: no bids with auction_id={auction_id} — "
+            f"falling back to bid_queue {bid_queue} (run migration to fix permanently)"
+        )
+        tids_r = supabase.table("trucks").select("id").in_("name", bid_queue).execute()
+        truck_ids = [r["id"] for r in (tids_r.data or [])]
+        if truck_ids:
+            fb = (
+                supabase.table("power_bids")
+                .select("id, truck_id, bid_price, battery_level, created_at")
+                .in_("truck_id", truck_ids)
+                .order("created_at", desc=False)
+                .execute()
+            )
+            bids = fb.data or []
+
+    if not bids:
+        ctx.logger.warning(
+            f"Terminal: no bids for auction {auction_id} — bids must store auction_id "
+            f"(see supabase/migrations/20250322_charging_auction_columns.sql). "
+            f"If bids exist in power_bids without auction_id, settlement cannot match."
+        )
+        _completed_auctions.add(auction_id)
+        bid_queue.clear()
+        return
+
+    # Latest bid per truck
+    latest_by_truck: dict[str, dict] = {}
+    for row in sorted(bids, key=lambda x: x.get("created_at") or ""):
+        tid = row.get("truck_id")
+        if tid:
+            latest_by_truck[str(tid)] = row
+
+    trows = (
+        supabase.table("trucks")
+        .select("id,name")
+        .in_("id", list(latest_by_truck.keys()))
+        .execute()
+    )
+    id_to_name = {str(t["id"]): t["name"] for t in (trows.data or [])}
+
+    candidates: list[tuple[str, str, float, int]] = []
+    for tid, row in latest_by_truck.items():
+        name = id_to_name.get(tid)
+        if not name:
+            continue
+        candidates.append(
+            (
+                name,
+                str(row["id"]),
+                float(row.get("bid_price") or 0),
+                int(row.get("battery_level") or 0),
+            )
+        )
+    # Lower $/kWh first, then neediest battery (lower %)
+    candidates.sort(key=lambda x: (x[2], x[3]))
+    if not candidates:
+        ctx.logger.warning(f"Terminal: no candidate trucks after join for auction {auction_id}")
+        _completed_auctions.add(auction_id)
+        bid_queue.clear()
+        return
+
+    ap = (
+        supabase.table("auction_state")
+        .select("current_price,min_price")
+        .eq("id", auction_id)
+        .limit(1)
+        .execute()
+    )
+    clearing = 0.35
+    if ap.data:
+        clearing = float(ap.data[0].get("current_price") or ap.data[0].get("min_price") or 0.35)
+
+    bays_r = (
+        supabase.table("bays")
+        .select("id,name")
+        .eq("status", "available")
+        .execute()
+    )
+    bays = sorted(bays_r.data or [], key=lambda b: b.get("name") or "")
+    winners = candidates[: len(bays)]
+
+    for i, (truck_name, bid_row_id, _bp, _bl) in enumerate(winners):
+        if i > 0:
+            await asyncio.sleep(_WINNER_STAGGER_S)
+        bay = bays[i]
+        bay_id = bay["id"]
+        _locked_bays[bay_id] = truck_name
+        if not lock_bay(bay_id, truck_name):
+            ctx.logger.warning(f"Terminal: could not lock {bay['name']} for {truck_name}")
+            continue
+
+        tr = (
+            supabase.table("trucks")
+            .select("state_of_charge")
+            .eq("name", truck_name)
+            .limit(1)
+            .execute()
+        )
+        soc0 = 50
+        if tr.data:
+            soc0 = int(tr.data[0].get("state_of_charge") or 50)
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        update_truck_status(
+            truck_name,
+            "charging",
+            bay_id,
+            soc0,
+            charging_started_at=now_iso,
+            charge_start_soc=soc0,
+        )
+        save_bid_response(bid_row_id, True, bay_id, clearing, i + 1)
+
+        addr = _truck_agent_address(truck_name)
+        if addr:
+            await ctx.send(
+                addr,
+                BidResponse(
+                    accepted=True,
+                    bay=bay["name"],
+                    price_confirmed=clearing,
+                    queue_position=i + 1,
+                    pending_auction=False,
+                ),
+            )
+
+        ctx.logger.info(
+            f"Terminal: winner {i + 1}/{len(winners)} — {truck_name} → {bay['name']} @ ${clearing:.2f}/kWh"
+        )
+        log_event(
+            "win",
+            f"terminal → {truck_name}: AUCTION_SETTLE bay={bay['name']} at ${clearing:.2f}/kWh",
+        )
+
+    _completed_auctions.add(auction_id)
+    bid_queue.clear()
+
+
+@terminal.on_message(model=AuctionComplete, allow_unverified=True)
+async def on_auction_complete(ctx: Context, sender: str, msg: AuctionComplete) -> None:
+    ctx.logger.info(
+        f"Terminal: AuctionComplete from {sender} auction={msg.auction_id} reason={msg.reason!r}"
+    )
+    await settle_auction(ctx, msg.auction_id)
 
 
 @terminal.on_message(model=PowerBid)
@@ -133,66 +350,118 @@ async def handle_bid(ctx: Context, sender: str, bid: PowerBid):
     reason = (bid.reasoning or "").strip().replace("\n", " ")
     if len(reason) > 60:
         reason = reason[:57] + "…"
+
+    active_aid = _active_auction_id()
+    msg_aid = (getattr(bid, "auction_id", None) or "").strip()
+
+    if active_aid:
+        # During live auction: record bid only — no bay until Grid sends AuctionComplete.
+        if msg_aid and msg_aid != active_aid:
+            await ctx.send(
+                sender,
+                BidResponse(
+                    accepted=False,
+                    bay=None,
+                    price_confirmed=bid.bid_price,
+                    queue_position=0,
+                    pending_auction=False,
+                ),
+            )
+            return
+
+        save_aid = active_aid
+        bid_id = save_bid(
+            truck_name=bid.truck_id,
+            battery_level=bid.battery_level,
+            requested_kwh=bid.requested_kwh,
+            bid_price=bid.bid_price,
+            reasoning=bid.reasoning,
+            auction_id=save_aid,
+        )
+        if bid.truck_id not in bid_queue:
+            bid_queue.append(bid.truck_id)
+        queue_position = bid_queue.index(bid.truck_id) + 1
+
+        update_truck_status(bid.truck_id, "bidding", None, int(bid.battery_level))
+
+        log_event(
+            "bid",
+            f"BID {bid.truck_id} ${bid.bid_price:.2f}/kWh · batt {bid.battery_level:.0f}% · {reason} (pending settlement)",
+        )
+
+        await ctx.send(
+            sender,
+            BidResponse(
+                accepted=False,
+                bay=None,
+                price_confirmed=bid.bid_price,
+                queue_position=queue_position,
+                pending_auction=True,
+            ),
+        )
+        return
+
+    # No active auction — legacy path (should be rare)
     log_event(
         "bid",
         f"BID {bid.truck_id} ${bid.bid_price:.2f}/kWh · batt {bid.battery_level:.0f}% · {reason}",
     )
 
-    # Save bid to Supabase
     bid_id = save_bid(
         truck_name=bid.truck_id,
         battery_level=bid.battery_level,
         requested_kwh=bid.requested_kwh,
         bid_price=bid.bid_price,
-        reasoning=bid.reasoning
+        reasoning=bid.reasoning,
+        auction_id=msg_aid or None,
     )
 
-    # Track queue position
     if bid.truck_id not in bid_queue:
         bid_queue.append(bid.truck_id)
     queue_position = bid_queue.index(bid.truck_id) + 1
 
-    # Count available bays and trucks currently waiting (not charging)
     available_bays = get_available_bay(exclude_ids=list(_locked_bays.keys()))
     all_available = supabase.table("bays").select("id").eq("status", "available").execute()
     available_count = len([b for b in (all_available.data or []) if b["id"] not in _locked_bays])
     waiting_trucks = supabase.table("trucks").select("id").in_("status", ["idle", "bidding"]).execute()
     waiting_count = len(waiting_trucks.data or [])
 
-    # If more spots than trucks — direct assign, no auction needed
     direct_assign = available_count >= waiting_count
-
     bay = available_bays
 
     if bay:
         _locked_bays[bay["id"]] = bid.truck_id
         lock_bay(bay["id"], bid.truck_id)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        soc0 = int(bid.battery_level)
         update_truck_status(
             bid.truck_id,
             "charging",
             bay["id"],
-            state_of_charge=int(bid.battery_level),
+            state_of_charge=soc0,
+            charging_started_at=now_iso,
+            charge_start_soc=soc0,
         )
-        # If direct assign, use market price instead of bid price
         confirmed_price = bid.bid_price if not direct_assign else bid.bid_price * 0.9
         save_bid_response(bid_id, True, bay["id"], confirmed_price, queue_position)
         response = BidResponse(
             accepted=True,
             bay=bay["name"],
             price_confirmed=confirmed_price,
-            queue_position=queue_position
+            queue_position=queue_position,
+            pending_auction=False,
         )
-        mode = "DIRECT" if direct_assign else "AUCTION"
+        mode = "DIRECT" if direct_assign else "LEGACY"
         ctx.logger.info(f"Terminal: {bid.truck_id} assigned bay {bay['name']} [{mode}]")
         log_event("win", f"terminal → {bid.truck_id}: {mode} bay={bay['name']} at ${confirmed_price:.2f}/kWh")
     else:
-        # All bays full — auction required, reject
         save_bid_response(bid_id, False, None, bid.bid_price, queue_position)
         response = BidResponse(
             accepted=False,
             bay=None,
             price_confirmed=bid.bid_price,
-            queue_position=queue_position
+            queue_position=queue_position,
+            pending_auction=False,
         )
         ctx.logger.info(f"Terminal: {bid.truck_id} rejected — no bays available")
         log_event("bid", f"terminal → {bid.truck_id}: REJECTED — no bays available")
@@ -213,6 +482,27 @@ async def demo_charging_tick(ctx: Context) -> None:
                 del _locked_bays[bay_id]
     except Exception as e:
         ctx.logger.warning(f"Terminal: charging tick failed — {e}")
+
+
+@terminal.on_interval(period=_SETTLE_POLL_S)
+async def poll_completed_auctions(ctx: Context) -> None:
+    """Catch any auction_state rows marked complete that we haven't settled yet.
+    Handles the case where the AuctionComplete message from Grid was dropped or the
+    TERMINAL_AGENT_ADDRESS env var is misconfigured."""
+    try:
+        r = (
+            supabase.table("auction_state")
+            .select("id")
+            .eq("status", "complete")
+            .execute()
+        )
+        for row in r.data or []:
+            aid = row["id"]
+            if aid not in _completed_auctions:
+                ctx.logger.info(f"Terminal: poll found unsettled completed auction {aid} — settling now")
+                await settle_auction(ctx, aid)
+    except Exception as e:
+        ctx.logger.warning(f"Terminal: poll_completed_auctions failed — {e}")
 
 
 if DEMO_GRID_HEARTBEAT_S > 0 and GRID_AGENT_ADDRESS:

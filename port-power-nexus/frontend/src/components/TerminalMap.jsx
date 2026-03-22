@@ -1,5 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
-import useRealtimeTable from '../hooks/useRealtimeTable'
+import useRealtimeTable, { REFETCH_ON_EVENTS_INSERT } from '../hooks/useRealtimeTable'
 import useSmoothPosition from '../hooks/useSmoothPosition'
 import useSmoothSoc from '../hooks/useSmoothSoc'
 import {
@@ -7,9 +6,10 @@ import {
   effectiveMapStatus,
 } from '../lib/mapTruckStatus'
 import {
-  EXIT_RIGHT_X,
+  EXIT_PIER_E_SLOT,
   PIER_BOXES,
-  SPAWN_LEFT_X,
+  getExitPierECenter,
+  getExitPierIdForTruck,
   getIdleCenterForTruck,
 } from '../lib/pierSlots'
 import { formatSocPercent, normalizeSoc } from '../lib/truckDisplay'
@@ -134,9 +134,17 @@ function latestReasoningForTruck(powerBids, truckId, maxLen = 38) {
 function resolveTruckPosition(truck, baysRows) {
   const status = effectiveMapStatus(truck, baysRows)
   const idle = getIdleCenterForTruck(truck.name)
+  const soc = normalizeSoc(truck.state_of_charge ?? 0)
+  // Pier E (right): full charge / exit — not Pier T idle (left).
+  // `done` is only used in UI if present in DB; Python normally uses `at_port` / `idle`.
+  const onPierE =
+    status === 'at_port' ||
+    status === 'done' ||
+    (status === 'idle' && soc >= 100)
 
-  if (status === 'at_port') {
-    return { x: EXIT_RIGHT_X, y: idle.y }
+  if (onPierE) {
+    const pe = getExitPierECenter(truck.name)
+    return { x: pe.x, y: pe.y }
   }
   if (status === 'charging') {
     const bay = (baysRows ?? []).find((b) => b.id === truck.bay_id)
@@ -198,20 +206,20 @@ function getTruckTooltipOffset(name) {
   return TOOLTIP_OFFSETS[idx >= 0 ? idx : 0]
 }
 
-function TruckNode({ truck, baysRows, powerBids, respawnEpoch = 0 }) {
-  const status = effectiveMapStatus(truck, baysRows)
-  const idleCenter = getIdleCenterForTruck(truck.name)
+function TruckNode({ truck, baysRows, powerBids }) {
+  const rawStatus = effectiveMapStatus(truck, baysRows)
+  const socNode = normalizeSoc(truck.state_of_charge ?? 0)
+  // Full battery / terminal states on Pier E match exit styling, not idle (left) drift.
+  const status =
+    rawStatus === 'idle' && socNode >= 100
+      ? 'at_port'
+      : rawStatus === 'done'
+        ? 'at_port'
+        : rawStatus
   const target = resolveTruckPosition(truck, baysRows)
-  const moveMs =
-    respawnEpoch > 0 ? 4200 : status === 'at_port' ? 4800 : 3400
-  const pos = useSmoothPosition(
-    target.x,
-    target.y,
-    moveMs,
-    respawnEpoch,
-    respawnEpoch > 0 ? SPAWN_LEFT_X : null,
-    respawnEpoch > 0 ? idleCenter.y : null
-  )
+  const moveMs = status === 'at_port' ? 4800 : 3400
+  // Smooth motion only — no off-screen "respawn" from the left when returning to idle.
+  const pos = useSmoothPosition(target.x, target.y, moveMs)
   const path = getTruckPath(truck.name)
   const off = getTruckTooltipOffset(truck.name)
   const colors = nodeColors(status)
@@ -387,37 +395,29 @@ function TruckNode({ truck, baysRows, powerBids, respawnEpoch = 0 }) {
 }
 
 export default function TerminalMap({ powerBids, style, demo }) {
-  const { rows: trucksDb } = useRealtimeTable('trucks')
-  const { rows: baysDb } = useRealtimeTable('bays')
+  const { rows: trucksDb } = useRealtimeTable('trucks', {
+    refetchOnChanges: REFETCH_ON_EVENTS_INSERT,
+  })
+  const { rows: baysDb } = useRealtimeTable('bays', {
+    refetchOnChanges: REFETCH_ON_EVENTS_INSERT,
+  })
 
   const trucks = demo ? [demo.truck] : trucksDb
   const baysRows = demo ? demo.bays : baysDb
 
-  const [respawnEpoch, setRespawnEpoch] = useState({})
-  const prevStatusRef = useRef({})
-
-  useEffect(() => {
-    for (const t of trucks ?? []) {
-      const st = effectiveMapStatus(t, baysRows)
-      const id = t.id
-      const was = prevStatusRef.current[id]
-      if (was === 'at_port' && st === 'idle') {
-        setRespawnEpoch((r) => ({ ...r, [id]: (r[id] ?? 0) + 1 }))
-      }
-      prevStatusRef.current[id] = st
-    }
-  }, [trucks, baysRows])
-
   const idlePierLit = new Set(
-    (trucks ?? [])
-      .filter((t) => effectiveMapStatus(t, baysRows) === 'idle')
-      .map((t) => getIdleCenterForTruck(t.name).pierId)
+    (trucks ?? []).map((t) => {
+      const st = effectiveMapStatus(t, baysRows)
+      const soc = normalizeSoc(t.state_of_charge ?? 0)
+      if (st === 'at_port' || st === 'done' || (st === 'idle' && soc >= 100)) {
+        return getExitPierIdForTruck(t.name)
+      }
+      if (st === 'idle') return getIdleCenterForTruck(t.name).pierId
+      return null
+    }).filter(Boolean)
   )
 
-  // Hide trucks at 100% / departed (at_port) — next tick they reset as a “new” inbound unit.
-  const mapTrucks = (trucks ?? []).filter(
-    (t) => effectiveMapStatus(t, baysRows) !== 'at_port'
-  )
+  const mapTrucks = trucks ?? []
 
   return (
     <div
@@ -499,7 +499,7 @@ export default function TerminalMap({ powerBids, style, demo }) {
               />
               <text
                 x={box.x + box.w / 2}
-                y={box.y + 19}
+                y={box.y + 9}
                 textAnchor="middle"
                 fill={lit ? '#ffdd66' : '#2a5a8a'}
                 fontSize="8"
@@ -554,7 +554,7 @@ export default function TerminalMap({ powerBids, style, demo }) {
               />
               <text
                 x={box.x + box.w / 2}
-                y={box.y + 19}
+                y={box.y + 9}
                 textAnchor="middle"
                 fill={lit ? '#ffdd66' : '#2a5a8a'}
                 fontSize="8"
@@ -743,7 +743,6 @@ export default function TerminalMap({ powerBids, style, demo }) {
             truck={truck}
             baysRows={baysRows}
             powerBids={powerBids}
-            respawnEpoch={respawnEpoch[truck.id] ?? 0}
           />
         ))}
       </svg>

@@ -1,4 +1,5 @@
-import useRealtimeTable from '../hooks/useRealtimeTable'
+import { useMemo } from 'react'
+import useRealtimeTable, { REFETCH_ON_EVENTS_INSERT } from '../hooks/useRealtimeTable'
 
 const styles = `
   @keyframes blink {
@@ -11,14 +12,37 @@ const styles = `
   }
 `
 
+/** Stable options — avoids resubscribing every render. */
+const AUCTION_STATE_OPTIONS = {
+  orderBy: 'started_at',
+  orderAscending: false,
+  limit: 1,
+  // Any `events` INSERT (incl. auction_end) — filtered INSERT Realtime is unreliable.
+  refetchOnChanges: REFETCH_ON_EVENTS_INSERT,
+}
+
+/** How much the HUD bar follows live charging-bay utilization vs grid agent (CAISO blend). Match grid ~0.75. */
+const BAY_STRESS_HUD_WEIGHT = 0.75
+
+const BAYS_OPTIONS = {
+  refetchOnChanges: REFETCH_ON_EVENTS_INSERT,
+}
+
+/** Locked (non-available) bays / total bays — same definition as grid agent. */
+function bayUtilizationStress(baysRows) {
+  const bays = baysRows ?? []
+  const totalB = Math.max(bays.length, 1)
+  const locked = bays.filter(
+    (b) => String(b.status ?? '').toLowerCase() !== 'available'
+  ).length
+  return locked / totalB
+}
+
 export default function TopBar() {
   // Latest row from Grid Agent upserts (status active | complete). Do not filter
   // status=active only — completed auctions would disappear from the HUD.
-  const { rows, lastUpdated } = useRealtimeTable('auction_state', {
-    orderBy: 'started_at',
-    orderAscending: false,
-    limit: 1,
-  })
+  const { rows, lastUpdated } = useRealtimeTable('auction_state', AUCTION_STATE_OPTIONS)
+  const { rows: baysRows } = useRealtimeTable('bays', BAYS_OPTIONS)
 
   const row = rows[0] ?? {}
   const price =
@@ -26,7 +50,14 @@ export default function TopBar() {
       ? `$${Number(row.current_price).toFixed(2)}`
       : null
 
-  const gridStress = Number(row.grid_stress ?? 0)
+  const auctionActive = String(row.status ?? '').toLowerCase() === 'active'
+
+  const bayStress = useMemo(() => bayUtilizationStress(baysRows), [baysRows])
+  const agentStress = Number(row.grid_stress ?? 0)
+  const gridStress = useMemo(() => {
+    const w = BAY_STRESS_HUD_WEIGHT
+    return Math.min(1, (1 - w) * agentStress + w * bayStress)
+  }, [agentStress, bayStress])
   const renewablePct = Math.round(row.renewable_pct ?? 0)
 
   let stressColor = '#00ff88'
@@ -34,7 +65,7 @@ export default function TopBar() {
   else if (gridStress >= 0.5) stressColor = '#ffaa00'
 
   const stale =
-    lastUpdated != null && Date.now() - lastUpdated > 15000
+    lastUpdated != null && Date.now() - lastUpdated > 15000 && auctionActive
 
   return (
     <>
@@ -117,11 +148,22 @@ export default function TopBar() {
             </div>
             <div
               style={{
+                fontSize: 10,
+                color: auctionActive ? '#00aa66' : '#6a8aaa',
+                letterSpacing: 1,
+                fontFamily: 'Courier New, monospace',
+                marginBottom: 2,
+              }}
+            >
+              {auctionActive ? '● LIVE' : '○ ENDED'}
+            </div>
+            <div
+              style={{
                 fontSize: 22,
-                color: price ? '#00ff88' : '#3a6a8a',
+                color: price ? (auctionActive ? '#00ff88' : '#6a8aaa') : '#3a6a8a',
                 letterSpacing: 2,
                 fontFamily: 'Courier New, monospace',
-                animation: price ? 'pricepulse 2s infinite' : 'none',
+                animation: price && auctionActive ? 'pricepulse 2s infinite' : 'none',
               }}
             >
               {price ?? '--'}

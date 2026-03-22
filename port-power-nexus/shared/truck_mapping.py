@@ -3,6 +3,15 @@
 import re
 from typing import Optional
 
+# Matches TRUCK_AGENT_ADDRESSES order in .env (same as agents/trucks/agent.py).
+FLEET_ORDER = [
+    "amazon_truck",
+    "fedex_truck",
+    "ups_truck",
+    "dhl_truck",
+    "rivian_truck",
+]
+
 # Index matches TRUCK_AGENT_ADDRESSES order (Truck_01 … Truck_05).
 TRUCK_INDEX_TO_AGENT: dict[int, str] = {
     1: "amazon_truck",
@@ -22,3 +31,10 @@ def truck_label_to_agent_name(truck_label: str) -> Optional[str]:
 
 def is_all_trucks_auction(truck_id: str) -> bool:
     return truck_id.strip().lower() in ("", "all", "*")
+
+
+def fleet_index(name: str) -> int | None:
+    try:
+        return FLEET_ORDER.index(name)
+    except ValueError:
+        return None

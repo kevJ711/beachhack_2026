@@ -1,3 +1,4 @@
+import asyncio
 import os
 import requests
 from dotenv import load_dotenv
@@ -20,14 +21,17 @@ from shared.models import (
     StartAuctionRequest,
 )
 from shared.truck_mapping import is_all_trucks_auction, truck_label_to_agent_name
+from shared.config import terminal_agent_address, truck_agent_addresses_tuple
+from shared.agent_net import submit_endpoint
+from shared.agent_wiring import swarm_wiring_log_line
 
 SUPABASE_URL: str = os.environ["SUPABASE_URL"]
 SUPABASE_KEY: str = os.environ["SUPABASE_ANON_KEY"]
 
-# Truck agent addresses — fill in after each truck agent is registered
-TRUCK_AGENT_ADDRESSES: list[str] = os.environ.get(
-    "TRUCK_AGENT_ADDRESSES", ""
-).split(",")
+# Five fleet uAgent addresses (must match running truck agents — same .env everywhere)
+TRUCK_AGENT_ADDRESSES: list[str] = list(truck_agent_addresses_tuple())
+# Must match trucks' bid target; empty env alone skipped AuctionComplete to terminal (no bay settlement).
+TERMINAL_AGENT_ADDRESS: str = terminal_agent_address()
 
 # GridStatus API — https://api.gridstatus.io/v1
 GRIDSTATUS_API_KEY: str = os.environ.get("GRIDSTATUS_API_KEY", "")
@@ -37,7 +41,16 @@ GRIDSTATUS_BASE_URL = "https://api.gridstatus.io/v1"
 AUCTION_START_PRICE: float = float(os.environ.get("AUCTION_START_PRICE", "0.35"))   # $/kWh
 AUCTION_MIN_PRICE: float   = float(os.environ.get("AUCTION_MIN_PRICE",   "0.08"))   # $/kWh
 AUCTION_PRICE_STEP: float  = float(os.environ.get("AUCTION_PRICE_STEP",  "0.01"))   # drop per tick
-AUCTION_TICK_SECONDS: int  = int(os.environ.get("AUCTION_TICK_SECONDS",  "5"))
+# How often the grid drops price and broadcasts (shorter = snappier demo)
+AUCTION_TICK_SECONDS: int  = int(os.environ.get("AUCTION_TICK_SECONDS",  "1"))
+# Hard cap — auction always ends by this wall time (then terminal settles bids)
+AUCTION_DURATION_SECONDS: float = float(os.environ.get("AUCTION_DURATION_SECONDS", "10"))
+
+# grid_stress blends CAISO load (0–1) with charging-bay utilization (locked bays / total bays only).
+# 1.0 = 100% weight on bays; 0.0 = CAISO load only. Default 0.75 so bay usage moves the needle.
+GRID_STRESS_BAY_WEIGHT: float = float(os.environ.get("GRID_STRESS_BAY_WEIGHT", "0.75"))
+# Push latest stress/renewables to auction_state this often (HUD + Realtime) even between auction ticks.
+GRID_STRESS_HUD_REFRESH_S: float = float(os.environ.get("GRID_STRESS_HUD_REFRESH_S", "2"))
 
 # GridSignal imported from shared.models — both sides must use the same class.
 
@@ -49,6 +62,11 @@ def get_supabase() -> Client:
 def upsert_auction(sb: Client, auction_id: str, payload: dict) -> None:
     """Insert or update the single active auction row."""
     sb.table("auction_state").upsert({"id": auction_id, **payload}).execute()
+
+
+def update_auction_state(sb: Client, auction_id: str, payload: dict) -> None:
+    """Partial update by id — use when only changing a few columns (avoids NOT NULL upsert nulls)."""
+    sb.table("auction_state").update(payload).eq("id", auction_id).execute()
 
 
 def log_event(sb: Client, event_type: str, message: str) -> None:
@@ -147,32 +165,78 @@ def fetch_caiso_load() -> dict:
         return {"grid_stress": 0.5, "load_mw": 0}
 
 
-_grid_cache: dict = {}
-_grid_cache_time: float = 0.0
+_fuel_load_cache: dict = {}
+_fuel_load_cache_time: float = 0.0
 GRID_CACHE_SECONDS = 30
 
+
+def compute_bay_utilization_stress(sb: Client) -> float:
+    """0–1: charging bays in use / total bays (non-`available` status = occupied)."""
+    try:
+        r = sb.table("bays").select("status").execute()
+        brows = r.data or []
+        if not brows:
+            return 0.0
+        total_b = len(brows)
+        used_b = sum(
+            1
+            for b in brows
+            if (b.get("status") or "").lower() not in ("available",)
+        )
+        return round(min(1.0, used_b / max(total_b, 1)), 4)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[GridAgent] bays read for stress failed: {exc}")
+        return 0.0
+
+
 def fetch_grid_data() -> dict:
-    """Merge fuel-mix + load into a single snapshot dict. Cached every 30 seconds."""
+    """Fuel-mix + CAISO load cached ~30s; bay utilization (locked/total) is read fresh each call."""
     import time
-    global _grid_cache, _grid_cache_time
-    if _grid_cache and (time.time() - _grid_cache_time) < GRID_CACHE_SECONDS:
-        return _grid_cache
-    fuel  = fetch_caiso_fuel_mix()
-    load  = fetch_caiso_load()
-    _grid_cache = {
+
+    global _fuel_load_cache, _fuel_load_cache_time
+    now = time.time()
+    if not _fuel_load_cache or (now - _fuel_load_cache_time) >= GRID_CACHE_SECONDS:
+        _fuel_load_cache = {
+            "fuel": fetch_caiso_fuel_mix(),
+            "load": fetch_caiso_load(),
+        }
+        _fuel_load_cache_time = now
+
+    fuel = _fuel_load_cache["fuel"]
+    load = _fuel_load_cache["load"]
+    load_stress = float(load["grid_stress"])
+
+    sb = get_supabase()
+    bay_stress = compute_bay_utilization_stress(sb)
+    w = max(0.0, min(1.0, GRID_STRESS_BAY_WEIGHT))
+    combined = min(1.0, (1.0 - w) * load_stress + w * bay_stress)
+
+    return {
         "renewable_pct": fuel["renewable_pct"],
-        "grid_stress":   load["grid_stress"],
-        "ca_iso_zone":   fuel["ca_iso_zone"],
-        "load_mw":       load["load_mw"],
+        "grid_stress": round(combined, 3),
+        "grid_stress_load": load_stress,
+        "grid_stress_bays": bay_stress,
+        "ca_iso_zone": fuel["ca_iso_zone"],
+        "load_mw": load["load_mw"],
     }
-    _grid_cache_time = time.time()
-    return _grid_cache
 
 
-grid_agent = Agent(
-    name = "grid_agent",
-    seed = os.environ.get("GRID_AGENT_SEED", "grid_agent_secret_seed"),
-)
+_grid_port_raw = os.environ.get("GRID_AGENT_PORT", "").strip()
+if _grid_port_raw:
+    _gp = int(_grid_port_raw, 10)
+    grid_agent = Agent(
+        name="grid_agent",
+        seed=os.environ.get("GRID_AGENT_SEED", "grid_agent_secret_seed"),
+        port=_gp,
+        endpoint=submit_endpoint(_gp),
+        mailbox=False,
+    )
+else:
+    grid_agent = Agent(
+        name="grid_agent",
+        seed=os.environ.get("GRID_AGENT_SEED", "grid_agent_secret_seed"),
+        mailbox=False,
+    )
 
 try:
     fund_agent_if_low(grid_agent.wallet.address())
@@ -195,6 +259,7 @@ class AuctionState:
         self.target_truck:  str   = ""
         self.requested_goal: str | None = None
         self.trucks_may_bid: bool = False
+        self.started_at: datetime | None = None
 
     def drop_price(self) -> None:
         self.current_price = round(
@@ -208,6 +273,38 @@ class AuctionState:
 
 
 _state = AuctionState()
+
+# Wall-clock auction end (on_interval does not align with auction start — see AUCTION_TICK_SECONDS).
+_auction_duration_task: asyncio.Task | None = None
+
+
+def _cancel_auction_duration_task() -> None:
+    global _auction_duration_task
+    if _auction_duration_task is not None and not _auction_duration_task.done():
+        _auction_duration_task.cancel()
+    _auction_duration_task = None
+
+
+def _schedule_auction_duration_end(ctx: Context) -> None:
+    """End the auction exactly after AUCTION_DURATION_SECONDS, independent of tick interval."""
+    _cancel_auction_duration_task()
+    global _auction_duration_task
+
+    async def _fire_after_duration() -> None:
+        try:
+            await asyncio.sleep(max(0.05, float(AUCTION_DURATION_SECONDS)))
+            if _state.active:
+                ctx.logger.info(
+                    f"[GridAgent] Auction {_state.auction_id} wall-clock limit "
+                    f"({AUCTION_DURATION_SECONDS:.0f}s) — ending"
+                )
+                await _end_auction(ctx, reason="time_expired")
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            ctx.logger.error(f"[GridAgent] time_expired handler failed: {e}")
+
+    _auction_duration_task = asyncio.create_task(_fire_after_duration())
 
 
 def _truck_index_from_agent_name(agent_name: str) -> int | None:
@@ -239,10 +336,13 @@ def _broadcast_targets(truck_id: str) -> tuple[list[str], str | None]:
 @grid_agent.on_event("startup")
 async def on_startup(ctx: Context) -> None:
     _state.reset()
+    n_trucks = len([a for a in TRUCK_AGENT_ADDRESSES if str(a).strip()])
     ctx.logger.info(
         f"[GridAgent] Ready — no auction until orchestrator sends StartAuctionRequest. "
-        f"address={ctx.agent.address}"
+        f"address={ctx.agent.address} | terminal={TERMINAL_AGENT_ADDRESS!r} | "
+        f"TRUCK_AGENT_ADDRESSES count={n_trucks}"
     )
+    ctx.logger.info(f"[GridAgent] {swarm_wiring_log_line()}")
 
 
 @grid_agent.on_message(model=DemoHeartbeat)
@@ -250,10 +350,40 @@ async def on_demo_heartbeat(ctx: Context, sender: str, msg: DemoHeartbeat) -> No
     ctx.logger.info(f"[GridAgent] heartbeat from terminal sender={sender} msg={msg.msg!r}")
 
 
+@grid_agent.on_interval(period=max(1.0, GRID_STRESS_HUD_REFRESH_S))
+async def refresh_auction_hud_metrics(ctx: Context) -> None:
+    """Keep latest auction_state row in sync with live port stress + renewables (TopBar Realtime)."""
+    try:
+        sb = get_supabase()
+        r = (
+            sb.table("auction_state")
+            .select("id")
+            .order("started_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = r.data or []
+        if not rows:
+            return
+        aid = rows[0]["id"]
+        grid = fetch_grid_data()
+        update_auction_state(
+            sb,
+            aid,
+            {
+                "grid_stress": grid["grid_stress"],
+                "renewable_pct": grid["renewable_pct"],
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        ctx.logger.warning(f"[GridAgent] HUD metrics refresh failed: {exc}")
+
+
 @grid_agent.on_message(model=StartAuctionRequest)
 async def on_start_auction_request(ctx: Context, sender: str, msg: StartAuctionRequest) -> None:
     sb = get_supabase()
 
+    _cancel_auction_duration_task()
     _state.reset()
     _state.auction_id = str(uuid.uuid4())
     _state.active = True
@@ -301,12 +431,15 @@ async def on_start_auction_request(ctx: Context, sender: str, msg: StartAuctionR
             status="accepted",
             note=(
                 f"The Dutch auction is live at ${AUCTION_START_PRICE:.2f}/kWh; "
-                f"{scope_note}"
+                f"{scope_note} "
+                f"Max duration {AUCTION_DURATION_SECONDS:.0f}s."
             ),
             timestamp=datetime.now(timezone.utc),
         ),
     )
+    _state.started_at = datetime.now(timezone.utc)
     _state.trucks_may_bid = True
+    _schedule_auction_duration_end(ctx)
 
 
 @grid_agent.on_interval(period=AUCTION_TICK_SECONDS)
@@ -343,7 +476,8 @@ async def auction_tick(ctx: Context) -> None:
         f"[GridAgent] Tick #{_state.tick_count} | "
         f"price=${_state.current_price:.4f} | "
         f"renewable={grid['renewable_pct']}% | "
-        f"stress={grid['grid_stress']}"
+        f"stress={grid['grid_stress']:.2f} "
+        f"(load={grid.get('grid_stress_load', 0):.2f} bays={grid.get('grid_stress_bays', 0):.2f})"
     )
 
     # 4. Update Supabase (frontend reads this)
@@ -430,14 +564,21 @@ async def _end_auction(ctx: Context, reason: str) -> None:
     if not _state.active:
         return
 
+    _cancel_auction_duration_task()
+
     _state.active = False
     _state.trucks_may_bid = False
 
     sb = get_supabase()
-    upsert_auction(sb, _state.auction_id, {"status": "complete"})
-    log_event(sb, "auction_start", f"Auction {_state.auction_id} ended: {reason}")
+    update_auction_state(sb, _state.auction_id, {"status": "complete"})
+    log_event(sb, "auction_end", f"Auction {_state.auction_id} ended: {reason}")
 
     complete_msg = AuctionComplete(auction_id=_state.auction_id, reason=reason)
+    if TERMINAL_AGENT_ADDRESS and not _is_self_address(ctx, TERMINAL_AGENT_ADDRESS):
+        try:
+            await ctx.send(TERMINAL_AGENT_ADDRESS, complete_msg)
+        except Exception as e:
+            ctx.logger.warning(f"[GridAgent] notify terminal of auction end failed: {e}")
     for addr in TRUCK_AGENT_ADDRESSES:
         addr = addr.strip()
         if not addr:

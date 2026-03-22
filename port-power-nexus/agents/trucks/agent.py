@@ -2,10 +2,13 @@ import random
 from uagents import Agent, Context, Bureau
 from shared.models import AuctionComplete, GridSignal, PowerBid, BidResponse
 from shared.supabase_client import supabase
+from shared.config import terminal_agent_address
+from shared.agent_net import submit_endpoint, truck_ports, trucks_bureau_port, uagents_host
+from shared.agent_wiring import swarm_wiring_log_line
 from agents.trucks.bidding import decide_bid
 from datetime import datetime
 
-TERMINAL_ADDRESS = "agent1q2dsyxc0g3482s3cewzss6vf4gakd2r8znask0gpmqrnvm0p5n0fy9gsulk"
+TERMINAL_ADDRESS = terminal_agent_address()
 
 # Starting virtual credits per truck (USD)
 STARTING_BALANCE = {
@@ -133,7 +136,8 @@ def _make_on_grid(truck_name: str, requested_kwh: float, battery_ref: list, meta
             requested_kwh=dynamic_kwh,
             bid_price=result["bid_price"],
             reasoning=result["reasoning"],
-            timestamp=datetime.now()
+            timestamp=datetime.now(),
+            auction_id=signal.auction_id,
         )
         ctx.logger.info(f"{truck_name}: bidding ${result['bid_price']:.2f}/kWh — {result['reasoning']}")
         await ctx.send(TERMINAL_ADDRESS, bid)
@@ -149,6 +153,9 @@ def _make_on_auction_complete(truck_name: str):
 
 def _make_on_response(truck_name: str, battery_ref: list, meta_ref: dict):
     async def _on_response(ctx: Context, sender: str, response: BidResponse):
+        if getattr(response, "pending_auction", False):
+            ctx.logger.info(f"{truck_name}: bid recorded — waiting for auction to settle")
+            return
         if response.accepted:
             battery_ref[0], _ = _truck_state_from_hub(truck_name, battery_ref[0])
             kwh = _calc_requested_kwh(battery_ref[0], meta_ref.get("destination", "Unknown"))
@@ -166,18 +173,25 @@ def _make_on_response(truck_name: str, battery_ref: list, meta_ref: dict):
 
 
 # ─────────────────────────── TRUCK DEFINITIONS ───────────────────────────
-
-_TRUCKS = [
-    ("amazon_truck", "amazon_truck_seed", 8011),
-    ("fedex_truck",  "fedex_truck_seed",  8012),
-    ("ups_truck",    "ups_truck_seed",    8013),
-    ("dhl_truck",    "dhl_truck_seed",    8014),
-    ("rivian_truck", "rivian_truck_seed", 8015),
+# Ports: TRUCK_PORT_BASE=8011 → 8011..8015, or TRUCK_PORTS=p1,p2,p3,p4,p5
+_TRUCK_SPECS = [
+    ("amazon_truck", "amazon_truck_seed"),
+    ("fedex_truck", "fedex_truck_seed"),
+    ("ups_truck", "ups_truck_seed"),
+    ("dhl_truck", "dhl_truck_seed"),
+    ("rivian_truck", "rivian_truck_seed"),
 ]
+_ports = truck_ports()
 
 _agents = {}
-for _name, _seed, _port in _TRUCKS:
-    _agent = Agent(name=_name, seed=_seed, port=_port, endpoint=[f"http://localhost:{_port}/submit"])
+for (_name, _seed), _port in zip(_TRUCK_SPECS, _ports):
+    _agent = Agent(
+        name=_name,
+        seed=_seed,
+        port=_port,
+        endpoint=submit_endpoint(_port),
+        mailbox=False,
+    )
     _batt = [float(random.randint(10, 95))]
     _meta = {"hours_until_deadline": random.randint(20, 120), "destination": random.choice(DESTINATIONS)}
 
@@ -198,7 +212,11 @@ truck5 = _agents["rivian_truck"]
 # ─────────────────────────── RUN ───────────────────────────
 
 if __name__ == "__main__":
-    bureau = Bureau()
+    _tb = trucks_bureau_port()
+    _th = uagents_host()
+    bureau = Bureau(port=_tb, endpoint=f"http://{_th}:{_tb}/submit")
     for _agent in _agents.values():
         bureau.add(_agent)
+    print(f"[trucks] Bureau endpoint: http://{_th}:{_tb}/submit")
+    print(f"[trucks] terminal={TERMINAL_ADDRESS!r} | {swarm_wiring_log_line()}")
     bureau.run()

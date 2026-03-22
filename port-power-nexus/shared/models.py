@@ -25,6 +25,7 @@ class PowerBid(Model):
     bid_price: float          # $/kWh the truck offers
     reasoning: str            # LLM explanation string
     timestamp: datetime
+    auction_id: str = ""      # GridSignal.auction_id — required to settle after auction ends
 
 
 class BidResponse(Model):
@@ -33,6 +34,8 @@ class BidResponse(Model):
     bay: Optional[str]
     price_confirmed: float
     queue_position: int
+    # True while auction is running — bid recorded but no bay yet
+    pending_auction: bool = False
 
 
 class StartAuctionRequest(Model):
