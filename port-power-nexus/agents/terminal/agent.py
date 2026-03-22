@@ -69,18 +69,7 @@ async def handle_bid(ctx: Context, sender: str, bid: PowerBid):
             ctx.logger.info(f"Terminal: {bid.truck_id} won bay {bay['name']}")
             log_event("win", f"terminal → {bid.truck_id}: ACCEPTED bay={bay['name']} at ${bid.bid_price:.2f}/kWh")
 
-            # Ledger transaction — optional demo (needs funded testnet wallet)
-            try:
-                await ctx.ledger.send_tokens(
-                    destination=terminal.wallet.address(),
-                    amount=int(bid.bid_price * 100),  # uFET scale
-                    denom="atestfet",
-                    sender=terminal.wallet,
-                    memo=f"charge-{bid.truck_id}-{bay['name']}",
-                )
-                ctx.logger.info(f"Terminal: ledger tx sent for {bid.truck_id}")
-            except Exception as e:
-                ctx.logger.warning(f"Terminal: ledger tx failed — {e}")
+            ctx.logger.info(f"Terminal: awaiting atestfet payment from {bid.truck_id}")
         else:
             # Bay was locked by another truck in a race
             save_bid_response(bid_id, False, None, bid.bid_price, queue_position)

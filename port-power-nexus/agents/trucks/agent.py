@@ -1,10 +1,12 @@
 from uagents import Agent, Context, Bureau
+from uagents.setup import fund_agent_if_low
 from shared.models import GridSignal, PowerBid, BidResponse
 from shared.supabase_client import supabase
 from agents.trucks.bidding import decide_bid
 from datetime import datetime
 
 TERMINAL_ADDRESS = "agent1q2dsyxc0g3482s3cewzss6vf4gakd2r8znask0gpmqrnvm0p5n0fy9gsulk"
+TERMINAL_WALLET = "fetch1xz6mhfxl79l47r3x5n4lclrfs46rr8k26g9yt7"  # terminal agent wallet
 
 
 def _soc_from_hub(truck_name: str, fallback: float) -> float:
@@ -39,6 +41,27 @@ fedex_battery = 55.0
 ups_battery = 80.0
 
 
+# ─────────────────────────── STARTUP: fund wallets ───────────────────────────
+
+@truck1.on_event("startup")
+async def amazon_startup(ctx: Context):
+    fund_agent_if_low(ctx.wallet.address())
+    balance = ctx.ledger.query_bank_balance(ctx.wallet.address())
+    ctx.logger.info(f"Amazon wallet: {ctx.wallet.address()} | balance: {balance}")
+
+@truck2.on_event("startup")
+async def fedex_startup(ctx: Context):
+    fund_agent_if_low(ctx.wallet.address())
+    balance = ctx.ledger.query_bank_balance(ctx.wallet.address())
+    ctx.logger.info(f"FedEx wallet: {ctx.wallet.address()} | balance: {balance}")
+
+@truck3.on_event("startup")
+async def ups_startup(ctx: Context):
+    fund_agent_if_low(ctx.wallet.address())
+    balance = ctx.ledger.query_bank_balance(ctx.wallet.address())
+    ctx.logger.info(f"UPS wallet: {ctx.wallet.address()} | balance: {balance}")
+
+
 # ─────────────────────────── AMAZON ───────────────────────────
 
 @truck1.on_message(model=GridSignal)
@@ -65,6 +88,18 @@ async def amazon_on_response(ctx: Context, sender: str, response: BidResponse):
         ctx.logger.info(
             f"Amazon: charging at bay {response.bay} — SOC {amazon_battery:.0f}% (hub)"
         )
+        cost_atestfet = int(response.price_confirmed * 50.0 * 1_000_000)  # requested_kwh=50
+        try:
+            await ctx.ledger.send_tokens(
+                destination=TERMINAL_WALLET,
+                amount=cost_atestfet,
+                denom="atestfet",
+                sender=ctx.wallet,
+                memo=f"charge-amazon_truck-{response.bay}",
+            )
+            ctx.logger.info(f"Amazon: paid {cost_atestfet} atestfet to terminal")
+        except Exception as e:
+            ctx.logger.warning(f"Amazon: payment failed — {e}")
     else:
         ctx.logger.info(f"Amazon: rejected, queue position {response.queue_position}")
 
@@ -95,6 +130,18 @@ async def fedex_on_response(ctx: Context, sender: str, response: BidResponse):
         ctx.logger.info(
             f"FedEx: charging at bay {response.bay} — SOC {fedex_battery:.0f}% (hub)"
         )
+        cost_atestfet = int(response.price_confirmed * 40.0 * 1_000_000)  # requested_kwh=40
+        try:
+            await ctx.ledger.send_tokens(
+                destination=TERMINAL_WALLET,
+                amount=cost_atestfet,
+                denom="atestfet",
+                sender=ctx.wallet,
+                memo=f"charge-fedex_truck-{response.bay}",
+            )
+            ctx.logger.info(f"FedEx: paid {cost_atestfet} atestfet to terminal")
+        except Exception as e:
+            ctx.logger.warning(f"FedEx: payment failed — {e}")
     else:
         ctx.logger.info(f"FedEx: rejected, queue position {response.queue_position}")
 
@@ -125,6 +172,18 @@ async def ups_on_response(ctx: Context, sender: str, response: BidResponse):
         ctx.logger.info(
             f"UPS: charging at bay {response.bay} — SOC {ups_battery:.0f}% (hub)"
         )
+        cost_atestfet = int(response.price_confirmed * 30.0 * 1_000_000)  # requested_kwh=30
+        try:
+            await ctx.ledger.send_tokens(
+                destination=TERMINAL_WALLET,
+                amount=cost_atestfet,
+                denom="atestfet",
+                sender=ctx.wallet,
+                memo=f"charge-ups_truck-{response.bay}",
+            )
+            ctx.logger.info(f"UPS: paid {cost_atestfet} atestfet to terminal")
+        except Exception as e:
+            ctx.logger.warning(f"UPS: payment failed — {e}")
     else:
         ctx.logger.info(f"UPS: rejected, queue position {response.queue_position}")
 
