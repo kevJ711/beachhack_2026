@@ -7,7 +7,6 @@ from uuid import uuid4
 
 from pydantic import BaseModel
 from uagents import Agent, Context, Model, Protocol
-from uagents.types import DeliveryStatus
 from uagents_core.contrib.protocols.chat import (
     ChatAcknowledgement,
     ChatMessage,
@@ -23,7 +22,8 @@ except NameError:
     agent = Agent(name="Logistics_Orchestrator", store_message_history=True)
 
 
-protocol = Protocol(spec=chat_protocol_spec)
+chat_protocol = Protocol(spec=chat_protocol_spec)
+swarm_protocol = Protocol(name="port_power_swarm", version="0.1.0")
 
 IntentType = Literal["start_auction_for_truck", "get_truck_status", "unknown"]
 PENDING_INDEX_KEY = "pending_request_ids"
@@ -249,6 +249,13 @@ def format_timeout_response(command: ParsedCommand) -> str:
     return "The orchestrator timed out waiting for a downstream swarm response."
 
 
+def is_failed_delivery(status: object) -> bool:
+    delivery_status = getattr(status, "status", None)
+    if delivery_status is None:
+        return True
+    return str(delivery_status).lower().endswith("failed")
+
+
 def _pending_key(request_id: str) -> str:
     return f"pending_request:{request_id}"
 
@@ -316,10 +323,9 @@ async def route_command(ctx: Context, sender: str, command: ParsedCommand) -> st
         status = await ctx.send(
             TRUCK_STATUS_AGENT_ADDRESS,
             request,
-            sync=False,
             timeout=ORCHESTRATOR_OUTBOUND_TIMEOUT_SECONDS,
         )
-        if status.status == DeliveryStatus.FAILED:
+        if is_failed_delivery(status):
             return (
                 f"I could not reach the truck status agent for {command.target_truck}. "
                 f"Details: {status.detail}."
@@ -342,10 +348,9 @@ async def route_command(ctx: Context, sender: str, command: ParsedCommand) -> st
     status = await ctx.send(
         GRID_AGENT_ADDRESS,
         request,
-        sync=False,
         timeout=ORCHESTRATOR_OUTBOUND_TIMEOUT_SECONDS,
     )
-    if status.status == DeliveryStatus.FAILED:
+    if is_failed_delivery(status):
         return (
             f"I could not reach the Grid Agent for {command.target_truck}. "
             f"Details: {status.detail}."
@@ -357,7 +362,7 @@ async def route_command(ctx: Context, sender: str, command: ParsedCommand) -> st
     )
 
 
-@protocol.on_message(ChatMessage)
+@chat_protocol.on_message(ChatMessage)
 async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
     await ctx.send(
         sender,
@@ -392,7 +397,7 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
     await ctx.send(sender, create_text_chat(reply))
 
 
-@protocol.on_message(AuctionStarted)
+@swarm_protocol.on_message(AuctionStarted)
 async def handle_auction_started(ctx: Context, sender: str, msg: AuctionStarted):
     pending = get_pending_request(ctx, msg.request_id)
     ctx.logger.info(
@@ -407,7 +412,7 @@ async def handle_auction_started(ctx: Context, sender: str, msg: AuctionStarted)
     )
 
 
-@protocol.on_message(TruckStatusResponse)
+@swarm_protocol.on_message(TruckStatusResponse)
 async def handle_truck_status_response(ctx: Context, sender: str, msg: TruckStatusResponse):
     pending = get_pending_request(ctx, msg.request_id)
     ctx.logger.info(
@@ -419,7 +424,7 @@ async def handle_truck_status_response(ctx: Context, sender: str, msg: TruckStat
     remove_pending_request(ctx, msg.request_id)
 
 
-@protocol.on_message(FinalAssignmentResponse)
+@swarm_protocol.on_message(FinalAssignmentResponse)
 async def handle_final_assignment(ctx: Context, sender: str, msg: FinalAssignmentResponse):
     pending = get_pending_request(ctx, msg.request_id)
     ctx.logger.info(
@@ -435,7 +440,7 @@ async def handle_final_assignment(ctx: Context, sender: str, msg: FinalAssignmen
     remove_pending_request(ctx, msg.request_id)
 
 
-@protocol.on_message(AgentErrorResponse)
+@swarm_protocol.on_message(AgentErrorResponse)
 async def handle_agent_error(ctx: Context, sender: str, msg: AgentErrorResponse):
     pending = get_pending_request(ctx, msg.request_id)
     ctx.logger.info(
@@ -447,12 +452,12 @@ async def handle_agent_error(ctx: Context, sender: str, msg: AgentErrorResponse)
     remove_pending_request(ctx, msg.request_id)
 
 
-@protocol.on_message(ChatAcknowledgement)
+@chat_protocol.on_message(ChatAcknowledgement)
 async def handle_ack(ctx: Context, sender: str, msg: ChatAcknowledgement):
     ctx.logger.debug(f"ack_received sender={sender} msg_id={msg.acknowledged_msg_id}")
 
 
-@protocol.on_interval(period=5.0)
+@swarm_protocol.on_interval(period=5.0)
 async def timeout_pending_requests(ctx: Context):
     pending_ids = list(ctx.storage.get(PENDING_INDEX_KEY) or [])
     now = time.time()
@@ -471,4 +476,5 @@ async def timeout_pending_requests(ctx: Context):
         remove_pending_request(ctx, request_id)
 
 
-agent.include(protocol, publish_manifest=True)
+agent.include(chat_protocol, publish_manifest=True)
+agent.include(swarm_protocol, publish_manifest=True)
