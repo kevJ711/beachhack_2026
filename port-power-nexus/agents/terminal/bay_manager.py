@@ -76,14 +76,17 @@ def _seed_bays_if_table_empty() -> None:
             pass
 
 
-def get_available_bay():
-    """Find the first available bay."""
-    result = supabase.table("bays").select("*").eq("status", "available").limit(1).execute()
-    if result.data:
-        return result.data[0]
-    _seed_bays_if_table_empty()
-    result = supabase.table("bays").select("*").eq("status", "available").limit(1).execute()
-    return result.data[0] if result.data else None
+def get_available_bay(exclude_ids: list[str] | None = None):
+    """Find the first available bay, optionally excluding bays already being assigned."""
+    query = supabase.table("bays").select("*").eq("status", "available")
+    result = query.execute()
+    if not result.data:
+        _seed_bays_if_table_empty()
+        result = supabase.table("bays").select("*").eq("status", "available").execute()
+    bays = result.data or []
+    if exclude_ids:
+        bays = [b for b in bays if b["id"] not in exclude_ids]
+    return bays[0] if bays else None
 
 
 def lock_bay(bay_id: str, truck_name: str):
