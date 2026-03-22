@@ -12,10 +12,11 @@ const styles = `
 `
 
 export default function TopBar() {
-  // `auction_state` row(s); align filterValue with your Grid Agent (e.g. active | running)
+  // Latest row from Grid Agent upserts (status active | complete). Do not filter
+  // status=active only — completed auctions would disappear from the HUD.
   const { rows, lastUpdated } = useRealtimeTable('auction_state', {
-    filterColumn: 'status',
-    filterValue: 'active',
+    orderBy: 'started_at',
+    orderAscending: false,
     limit: 1,
   })
 

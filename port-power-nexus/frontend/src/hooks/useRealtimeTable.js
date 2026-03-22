@@ -44,7 +44,19 @@ export default function useRealtimeTable(tableName, options = {}) {
       const { data, error } = await query
       if (cancelled) return
       if (error) {
-        console.error(`[useRealtimeTable:${tableName}]`, error)
+        console.error(
+          `[useRealtimeTable:${tableName}] REST error:`,
+          error.message ?? error,
+          '| code:',
+          error.code,
+          '| details:',
+          error.details,
+          '| hint:',
+          error.hint,
+          '\n→ If 401/403: check anon key + RLS (SELECT allowed for anon on public.' +
+            tableName +
+            ').'
+        )
         setRows([])
       } else {
         setRows(data ?? [])
@@ -78,7 +90,15 @@ export default function useRealtimeTable(tableName, options = {}) {
           setLastUpdated(Date.now())
         }
       )
-      .subscribe()
+      .subscribe((status, err) => {
+        if (import.meta.env.DEV && status === 'CHANNEL_ERROR') {
+          console.error(
+            `[useRealtimeTable:${tableName}] Realtime subscribe failed:`,
+            err?.message ?? err,
+            '— enable Realtime for this table in Supabase → Database → Replication.'
+          )
+        }
+      })
 
     channelRef.current = ch
 

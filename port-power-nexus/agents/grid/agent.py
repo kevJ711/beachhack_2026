@@ -3,7 +3,9 @@ import asyncio
 import requests
 import uuid
 from datetime import datetime, timezone
-from dotenv import load_dotenv
+
+import shared.env_loader  # noqa: F401 — repo root .env
+
 from supabase import create_client, Client
 from uagents import Agent, Context, Model
 from uagents.setup import fund_agent_if_low
@@ -13,8 +15,6 @@ from shared.models import (
     FinalAssignmentResponse,
     StartAuctionRequest,
 )
-
-load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Config — set these in your .env

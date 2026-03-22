@@ -3,6 +3,25 @@ import useSmoothPosition from '../hooks/useSmoothPosition'
 import { formatSocPercent, normalizeSoc } from '../lib/truckDisplay'
 
 const TRUCK_PATHS = {
+  // Live swarm (matches agents/trucks/agent.py truck_id / DB trucks.name)
+  amazon_truck: {
+    idlePosition: { x: 60, y: 150 },
+    approachPosition: { x: 175, y: 275 },
+    tooltipOffset: { x: 20, y: -50 },
+    driftDuration: 4.2,
+  },
+  fedex_truck: {
+    idlePosition: { x: 120, y: 230 },
+    approachPosition: { x: 210, y: 268 },
+    tooltipOffset: { x: 20, y: -50 },
+    driftDuration: 5.1,
+  },
+  ups_truck: {
+    idlePosition: { x: 330, y: 145 },
+    approachPosition: { x: 265, y: 280 },
+    tooltipOffset: { x: -110, y: -50 },
+    driftDuration: 3.6,
+  },
   TRUCK_01: {
     idlePosition: { x: 60, y: 150 },
     approachPosition: { x: 175, y: 275 },

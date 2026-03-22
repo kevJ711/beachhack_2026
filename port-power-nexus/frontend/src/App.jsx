@@ -2,7 +2,8 @@
  * Data flow: Supabase Realtime → hooks → UI. Debug UI: set VITE_DEMO_STATIC_TRUCK=true
  * to overlay a local TRUCK_01 loop (same row shape as `trucks` / `bays` tables).
  *
- * Schema: auction_state, trucks, bays, power_bids, bid_responses (see team ERD).
+ * Schema: auction_state, trucks, bays, power_bids, bid_responses, events (Grid Agent).
+ * For live agents + Supabase: set VITE_DEMO_STATIC_TRUCK=false in repo-root `.env`.
  */
 import { useMemo } from 'react'
 import TopBar from './components/TopBar'

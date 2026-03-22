@@ -34,7 +34,7 @@ export function isDemoStaticTruckEnabled() {
 
 /**
  * Local-only loop: idle → bidding → charging (TRUCK_01 + Bay A1).
- * Enable with VITE_DEMO_STATIC_TRUCK=true in .env.local
+ * Enable with VITE_DEMO_STATIC_TRUCK=true in repo-root `.env`
  */
 export default function useDemoStaticTruck() {
   const enabled = isDemoStaticTruckEnabled()

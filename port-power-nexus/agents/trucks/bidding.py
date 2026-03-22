@@ -1,9 +1,7 @@
 import openai
 import os
 import json
-from dotenv import load_dotenv
-
-load_dotenv()
+import shared.env_loader  # noqa: F401 — repo root .env
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
