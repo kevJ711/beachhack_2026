@@ -1,11 +1,18 @@
 import os
 import asyncio
 import requests
+import uuid
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from supabase import create_client, Client
 from uagents import Agent, Context, Model
 from uagents.setup import fund_agent_if_low
+from shared.models import (
+    AgentErrorResponse,
+    AuctionStarted,
+    FinalAssignmentResponse,
+    StartAuctionRequest,
+)
 
 load_dotenv()
 
@@ -207,6 +214,10 @@ class AuctionState:
         self.current_price: float = AUCTION_START_PRICE
         self.active:        bool  = False
         self.tick_count:    int   = 0
+        self.request_id:    str   = ""
+        self.reply_to:      str   = ""
+        self.target_truck:  str   = ""
+        self.requested_goal: str | None = None
 
     def drop_price(self) -> None:
         self.current_price = round(
@@ -228,7 +239,6 @@ _state = AuctionState()
 
 @grid_agent.on_event("startup")
 async def on_startup(ctx: Context) -> None:
-    import uuid
     sb = get_supabase()
 
     _state.reset()
@@ -248,6 +258,53 @@ async def on_startup(ctx: Context) -> None:
     log_event(sb, "auction_start", f"Dutch auction {_state.auction_id} started at ${AUCTION_START_PRICE}/kWh")
 
     ctx.logger.info(f"[GridAgent] Auction {_state.auction_id} started. address={ctx.address}")
+
+
+@grid_agent.on_message(model=StartAuctionRequest)
+async def on_start_auction_request(ctx: Context, sender: str, msg: StartAuctionRequest) -> None:
+    sb = get_supabase()
+
+    _state.reset()
+    _state.auction_id = str(uuid.uuid4())
+    _state.active = True
+    _state.request_id = msg.request_id
+    _state.reply_to = msg.reply_to
+    _state.target_truck = msg.truck_id
+    _state.requested_goal = msg.requested_goal
+
+    upsert_auction(sb, _state.auction_id, {
+        "current_price": AUCTION_START_PRICE,
+        "start_price": AUCTION_START_PRICE,
+        "min_price": AUCTION_MIN_PRICE,
+        "renewable_pct": 0.0,
+        "grid_stress": 0.0,
+        "status": "active",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+    })
+    log_event(
+        sb,
+        "auction_start",
+        f"Orchestrator requested auction {_state.auction_id} for {msg.truck_id}",
+    )
+
+    ctx.logger.info(
+        f"[GridAgent] Received StartAuctionRequest request_id={msg.request_id} "
+        f"truck={msg.truck_id} sender={sender}"
+    )
+
+    await ctx.send(
+        msg.reply_to,
+        AuctionStarted(
+            request_id=msg.request_id,
+            truck_id=msg.truck_id,
+            status="accepted",
+            note=(
+                f"The Dutch auction is live at ${AUCTION_START_PRICE:.2f}/kWh and "
+                f"broadcasting to {len([a for a in TRUCK_AGENT_ADDRESSES if a.strip()])} truck agents."
+            ),
+            timestamp=datetime.now(timezone.utc),
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -336,6 +393,24 @@ async def on_bid_accepted(ctx: Context, sender: str, msg: BidAccepted) -> None:
         f"Truck {msg.truck_id} won bay {msg.bay_id} at ${msg.price_paid:.4f}/kWh",
     )
 
+    if _state.reply_to and _state.request_id:
+        await ctx.send(
+            _state.reply_to,
+            FinalAssignmentResponse(
+                request_id=_state.request_id,
+                truck_id=msg.truck_id,
+                status="completed",
+                decision_summary=(
+                    f"{msg.truck_id} won the charging auction after the price dropped "
+                    "into its bidding threshold."
+                ),
+                bay=msg.bay_id,
+                price=msg.price_paid,
+                tx_hash=None,
+                timestamp=datetime.now(timezone.utc),
+            ),
+        )
+
     await _end_auction(ctx, reason="bid_accepted")
 
 
@@ -359,6 +434,20 @@ async def _end_auction(ctx: Context, reason: str) -> None:
         addr = addr.strip()
         if addr:
             await ctx.send(addr, complete_msg)
+
+    if reason == "price_floor_reached" and _state.reply_to and _state.request_id:
+        await ctx.send(
+            _state.reply_to,
+            AgentErrorResponse(
+                request_id=_state.request_id,
+                source_agent="grid_agent",
+                error_message=(
+                    f"The auction for {_state.target_truck or 'the requested truck'} "
+                    "reached the price floor before any winning bid was accepted."
+                ),
+                timestamp=datetime.now(timezone.utc),
+            ),
+        )
 
     ctx.logger.info(f"[GridAgent] Auction {_state.auction_id} ended — {reason}")
 
