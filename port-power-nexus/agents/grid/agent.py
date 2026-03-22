@@ -1,5 +1,4 @@
 import os
-import asyncio
 import requests
 from dotenv import load_dotenv
 import uuid
@@ -12,12 +11,15 @@ from supabase import create_client, Client
 from uagents import Agent, Context, Model
 from uagents.setup import fund_agent_if_low
 from shared.models import (
+    AuctionComplete,
+    DemoHeartbeat,
     GridSignal,
     AgentErrorResponse,
     AuctionStarted,
     FinalAssignmentResponse,
     StartAuctionRequest,
 )
+from shared.truck_mapping import is_all_trucks_auction, truck_label_to_agent_name
 
 SUPABASE_URL: str = os.environ["SUPABASE_URL"]
 SUPABASE_KEY: str = os.environ["SUPABASE_ANON_KEY"]
@@ -38,12 +40,6 @@ AUCTION_PRICE_STEP: float  = float(os.environ.get("AUCTION_PRICE_STEP",  "0.01")
 AUCTION_TICK_SECONDS: int  = int(os.environ.get("AUCTION_TICK_SECONDS",  "5"))
 
 # GridSignal imported from shared.models — both sides must use the same class.
-
-class AuctionComplete(Model):
-    """Sent from Grid Agent → Truck Agents when the auction ends."""
-    auction_id: str
-    reason:     str   # "price_floor_reached" | "bid_accepted"
-
 
 
 def get_supabase() -> Client:
@@ -198,6 +194,7 @@ class AuctionState:
         self.reply_to:      str   = ""
         self.target_truck:  str   = ""
         self.requested_goal: str | None = None
+        self.trucks_may_bid: bool = False
 
     def drop_price(self) -> None:
         self.current_price = round(
@@ -213,29 +210,44 @@ class AuctionState:
 _state = AuctionState()
 
 
+def _truck_index_from_agent_name(agent_name: str) -> int | None:
+    order = ["amazon_truck", "fedex_truck", "ups_truck", "dhl_truck", "rivian_truck"]
+    try:
+        return order.index(agent_name)
+    except ValueError:
+        return None
+
+
+def _is_self_address(ctx: Context, addr: str) -> bool:
+    return addr.strip() == ctx.agent.address
+
+
+def _broadcast_targets(truck_id: str) -> tuple[list[str], str | None]:
+    """Addresses that receive GridSignal, and invited_truck_name for the payload (None = any truck)."""
+    all_addrs = [a.strip() for a in TRUCK_AGENT_ADDRESSES if a.strip()]
+    if is_all_trucks_auction(truck_id):
+        return all_addrs, None
+    invited = truck_label_to_agent_name(truck_id)
+    if not invited:
+        return all_addrs, None
+    idx = _truck_index_from_agent_name(invited)
+    if idx is None or idx < 0 or idx >= len(all_addrs):
+        return all_addrs, invited
+    return [all_addrs[idx]], invited
+
+
 @grid_agent.on_event("startup")
 async def on_startup(ctx: Context) -> None:
-    sb = get_supabase()
-
     _state.reset()
-    _state.auction_id = str(uuid.uuid4())
-    _state.active     = True
-
-    # Seed initial row
-    upsert_auction(sb, _state.auction_id, {
-        "current_price": _state.current_price,
-        "start_price":   AUCTION_START_PRICE,
-        "min_price":     AUCTION_MIN_PRICE,
-        "renewable_pct": 0.0,
-        "grid_stress":   0.0,
-        "status":        "active",
-        "started_at":    datetime.now(timezone.utc).isoformat(),
-    })
-    log_event(sb, "auction_start", f"Dutch auction {_state.auction_id} started at ${AUCTION_START_PRICE}/kWh")
-
     ctx.logger.info(
-        f"[GridAgent] Auction {_state.auction_id} started. address={ctx.agent.address}"
+        f"[GridAgent] Ready — no auction until orchestrator sends StartAuctionRequest. "
+        f"address={ctx.agent.address}"
     )
+
+
+@grid_agent.on_message(model=DemoHeartbeat)
+async def on_demo_heartbeat(ctx: Context, sender: str, msg: DemoHeartbeat) -> None:
+    ctx.logger.info(f"[GridAgent] heartbeat from terminal sender={sender} msg={msg.msg!r}")
 
 
 @grid_agent.on_message(model=StartAuctionRequest)
@@ -270,6 +282,17 @@ async def on_start_auction_request(ctx: Context, sender: str, msg: StartAuctionR
         f"truck={msg.truck_id} sender={sender}"
     )
 
+    addrs, _inv = _broadcast_targets(msg.truck_id)
+    if is_all_trucks_auction(msg.truck_id):
+        scope_note = f"all {len(addrs)} truck agents may bid."
+    else:
+        agent = truck_label_to_agent_name(msg.truck_id)
+        scope_note = (
+            f"only {msg.truck_id} ({agent}) may bid — signals to 1 agent."
+            if agent
+            else f"auction for {msg.truck_id!r} — signals to {len(addrs)} agent(s)."
+        )
+
     await ctx.send(
         msg.reply_to,
         AuctionStarted(
@@ -277,17 +300,20 @@ async def on_start_auction_request(ctx: Context, sender: str, msg: StartAuctionR
             truck_id=msg.truck_id,
             status="accepted",
             note=(
-                f"The Dutch auction is live at ${AUCTION_START_PRICE:.2f}/kWh and "
-                f"broadcasting to {len([a for a in TRUCK_AGENT_ADDRESSES if a.strip()])} truck agents."
+                f"The Dutch auction is live at ${AUCTION_START_PRICE:.2f}/kWh; "
+                f"{scope_note}"
             ),
             timestamp=datetime.now(timezone.utc),
         ),
     )
+    _state.trucks_may_bid = True
 
 
 @grid_agent.on_interval(period=AUCTION_TICK_SECONDS)
 async def auction_tick(ctx: Context) -> None:
     if not _state.active:
+        return
+    if not _state.trucks_may_bid:
         return
 
     # 1. Pull live grid data from GridStatus
@@ -297,6 +323,8 @@ async def auction_tick(ctx: Context) -> None:
     _state.drop_price()
 
     now_iso = datetime.now(timezone.utc).isoformat()
+
+    addrs, invited_name = _broadcast_targets(_state.target_truck)
 
     # 3. Build the signal
     signal = GridSignal(
@@ -308,6 +336,7 @@ async def auction_tick(ctx: Context) -> None:
         grid_stress   = grid["grid_stress"],
         ca_iso_zone   = grid["ca_iso_zone"],
         timestamp     = now_iso,
+        invited_truck_name=invited_name,
     )
 
     ctx.logger.info(
@@ -326,18 +355,22 @@ async def auction_tick(ctx: Context) -> None:
         "status":        "active",
     })
 
-    # 5. Broadcast to all truck agents (throttle feed: every 3rd tick still shows grid↔swarm rhythm)
+    # 5. Broadcast to scoped truck agent(s) (throttle feed: every 3rd tick)
     if _state.tick_count % 3 == 0:
         log_event(
             sb,
             "signal",
-            f"grid_agent → trucks: price=${_state.current_price:.2f}/kWh | "
+            f"grid_agent → trucks ({len(addrs)}): price=${_state.current_price:.2f}/kWh | "
             f"renewable={grid['renewable_pct']}% | stress={grid['grid_stress']:.2f}",
         )
-    for addr in TRUCK_AGENT_ADDRESSES:
-        addr = addr.strip()
-        if addr:
-            await ctx.send(addr, signal)
+    for addr in addrs:
+        if _is_self_address(ctx, addr):
+            ctx.logger.warning(
+                "[GridAgent] TRUCK_AGENT_ADDRESSES includes this grid agent's address — "
+                "remove it from .env to avoid receiving your own GridSignal."
+            )
+            continue
+        await ctx.send(addr, signal)
 
     # 6. End auction if price has hit the floor
     if _state.at_floor:
@@ -398,6 +431,7 @@ async def _end_auction(ctx: Context, reason: str) -> None:
         return
 
     _state.active = False
+    _state.trucks_may_bid = False
 
     sb = get_supabase()
     upsert_auction(sb, _state.auction_id, {"status": "complete"})
@@ -406,8 +440,11 @@ async def _end_auction(ctx: Context, reason: str) -> None:
     complete_msg = AuctionComplete(auction_id=_state.auction_id, reason=reason)
     for addr in TRUCK_AGENT_ADDRESSES:
         addr = addr.strip()
-        if addr:
-            await ctx.send(addr, complete_msg)
+        if not addr:
+            continue
+        if _is_self_address(ctx, addr):
+            continue
+        await ctx.send(addr, complete_msg)
 
     if reason == "price_floor_reached" and _state.reply_to and _state.request_id:
         await ctx.send(

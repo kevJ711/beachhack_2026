@@ -6,7 +6,7 @@ from typing import Literal, Optional
 from uuid import uuid4
 
 from pydantic import BaseModel
-from uagents import Agent, Context, Model, Protocol
+from uagents import Context, Protocol
 from uagents_core.contrib.protocols.chat import (
     ChatAcknowledgement,
     ChatMessage,
@@ -15,11 +15,14 @@ from uagents_core.contrib.protocols.chat import (
     chat_protocol_spec,
 )
 
-
-try:
-    agent
-except NameError:
-    agent = Agent(name="Logistics_Orchestrator", store_message_history=True)
+from shared.models import (
+    AgentErrorResponse,
+    AuctionStarted,
+    FinalAssignmentResponse,
+    StartAuctionRequest,
+    TruckStatusRequest,
+    TruckStatusResponse,
+)
 
 
 chat_protocol = Protocol(spec=chat_protocol_spec)
@@ -36,7 +39,13 @@ TERMINAL_AGENT_ADDRESS = os.getenv(
     "TERMINAL_AGENT_ADDRESS",
     "agent1q2dsyxc0g3482s3cewzss6vf4gakd2r8znask0gpmqrnvm0p5n0fy9gsulk",
 )
-TRUCK_STATUS_AGENT_ADDRESS = os.getenv("TRUCK_STATUS_AGENT_ADDRESS", "agent://truck-status")
+TRUCK_STATUS_AGENT_ADDRESS = os.getenv(
+    "TRUCK_STATUS_AGENT_ADDRESS",
+    os.getenv(
+        "TERMINAL_AGENT_ADDRESS",
+        "agent1q2dsyxc0g3482s3cewzss6vf4gakd2r8znask0gpmqrnvm0p5n0fy9gsulk",
+    ),
+)
 ORCHESTRATOR_HELLO_TEXT = os.getenv(
     "ORCHESTRATOR_HELLO_TEXT", "Hello from Port-Power Nexus"
 )
@@ -55,58 +64,6 @@ class ParsedCommand(BaseModel):
     target_truck: Optional[str] = None
     requested_goal: Optional[str] = None
     original_text: str
-
-
-class StartAuctionRequest(Model):
-    request_id: str
-    truck_id: str
-    requested_goal: Optional[str]
-    original_text: str
-    reply_to: str
-    timestamp: datetime
-
-
-class AuctionStarted(Model):
-    request_id: str
-    truck_id: str
-    status: str
-    note: str
-    timestamp: datetime
-
-
-class TruckStatusRequest(Model):
-    request_id: str
-    truck_id: str
-    reply_to: str
-    timestamp: datetime
-
-
-class TruckStatusResponse(Model):
-    request_id: str
-    truck_id: str
-    truck_status: str
-    state_of_charge: Optional[float]
-    distance_to_port: Optional[float]
-    bay: Optional[str]
-    timestamp: datetime
-
-
-class FinalAssignmentResponse(Model):
-    request_id: str
-    truck_id: str
-    status: str
-    decision_summary: str
-    bay: Optional[str]
-    price: Optional[float]
-    tx_hash: Optional[str]
-    timestamp: datetime
-
-
-class AgentErrorResponse(Model):
-    request_id: str
-    source_agent: str
-    error_message: str
-    timestamp: datetime
 
 
 def extract_text(msg: ChatMessage) -> str:
@@ -154,6 +111,15 @@ def parse_command(message: str) -> ParsedCommand:
     truck_id = normalize_truck_id(message)
     goal = extract_goal(message)
 
+    if "start auction" in lowered:
+        tid = truck_id if truck_id else "all"
+        return ParsedCommand(
+            intent="start_auction_for_truck",
+            target_truck=tid,
+            requested_goal=goal,
+            original_text=message,
+        )
+
     if truck_id and any(word in lowered for word in STATUS_KEYWORDS):
         return ParsedCommand(
             intent="get_truck_status",
@@ -190,8 +156,8 @@ def format_unknown_response(command: ParsedCommand) -> str:
     )
     return (
         "I can coordinate charging requests for the Port-Power Nexus swarm."
-        f"{truck_hint} Try: \"what is the status of Truck_02\" or "
-        "\"find the cleanest charging slot for Truck_07\"."
+        f"{truck_hint} Try: \"start auction\" (whole fleet), "
+        "\"start auction for Truck_01\" (one truck), or \"what is the status of Truck_02\"."
     )
 
 
@@ -309,7 +275,10 @@ def parsed_command_from_pending(pending: dict) -> ParsedCommand:
 
 
 async def route_command(ctx: Context, sender: str, command: ParsedCommand) -> str:
-    if command.intent == "unknown" or not command.target_truck:
+    if command.intent == "unknown":
+        return format_unknown_response(command)
+
+    if command.intent == "get_truck_status" and not command.target_truck:
         return format_unknown_response(command)
 
     if command.intent == "get_truck_status":
@@ -356,8 +325,13 @@ async def route_command(ctx: Context, sender: str, command: ParsedCommand) -> st
             f"Details: {status.detail}."
         )
     save_pending_request(ctx, request_id, sender, command)
+    scope = (
+        "all trucks"
+        if (command.target_truck or "").lower() == "all"
+        else command.target_truck
+    )
     return (
-        f"I've dispatched an auction request for {command.target_truck}. "
+        f"I've dispatched an auction request for {scope}. "
         "I will return the reasoning, assigned bay, and TX hash as soon as the swarm responds."
     )
 
@@ -474,7 +448,3 @@ async def timeout_pending_requests(ctx: Context):
             create_text_chat(format_timeout_response(command)),
         )
         remove_pending_request(ctx, request_id)
-
-
-agent.include(chat_protocol, publish_manifest=True)
-agent.include(swarm_protocol, publish_manifest=True)

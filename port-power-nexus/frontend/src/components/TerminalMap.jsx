@@ -14,6 +14,9 @@ import {
 } from '../lib/pierSlots'
 import { formatSocPercent, normalizeSoc } from '../lib/truckDisplay'
 
+/** Multiplier on idle `drift` keyframe duration (higher = slower bob). */
+const DRIFT_SECONDS_SCALE = 2.2
+
 /** Approach + UI offsets — idle berth centers come from `getIdleCenterForTruck` (pier Y1…Y11). */
 const TRUCK_PATHS = {
   amazon_truck: {
@@ -200,7 +203,7 @@ function TruckNode({ truck, baysRows, powerBids, respawnEpoch = 0 }) {
   const idleCenter = getIdleCenterForTruck(truck.name)
   const target = resolveTruckPosition(truck, baysRows)
   const moveMs =
-    respawnEpoch > 0 ? 2000 : status === 'at_port' ? 2200 : 1500
+    respawnEpoch > 0 ? 4200 : status === 'at_port' ? 4800 : 3400
   const pos = useSmoothPosition(
     target.x,
     target.y,
@@ -212,15 +215,16 @@ function TruckNode({ truck, baysRows, powerBids, respawnEpoch = 0 }) {
   const path = getTruckPath(truck.name)
   const off = getTruckTooltipOffset(truck.name)
   const colors = nodeColors(status)
-  const drift = `${path?.driftDuration ?? 4}s`
+  const drift = `${((path?.driftDuration ?? 4) * DRIFT_SECONDS_SCALE).toFixed(1)}s`
   const reasoning = latestReasoningForTruck(
     powerBids,
     truck.id,
     MAP_TOOLTIP_REASON_MAX
   )
   const nameLabel = truncateTooltipText(String(truck.name ?? ''), MAP_TOOLTIP_NAME_MAX)
-  const anchorX = status === 'charging' ? target.x : pos.x
-  const anchorY = status === 'charging' ? target.y : pos.y
+  // Always anchor visuals on smoothed `pos` so transitions into charging (and tooltips) animate; never snap to `target`.
+  const anchorX = pos.x
+  const anchorY = pos.y
   const tx = anchorX + off.x
   const ty = anchorY + off.y
   const tw = 100
@@ -241,7 +245,7 @@ function TruckNode({ truck, baysRows, powerBids, respawnEpoch = 0 }) {
           style={{
             transformBox: 'fill-box',
             transformOrigin: 'center',
-            animation: 'ripple 2s infinite',
+            animation: 'ripple 4.5s infinite',
           }}
         />
       )}
@@ -276,14 +280,14 @@ function TruckNode({ truck, baysRows, powerBids, respawnEpoch = 0 }) {
 
       {status === 'charging' && (
         <circle
-          cx={target.x}
-          cy={target.y}
+          cx={pos.x}
+          cy={pos.y}
           r="6"
           fill="#ffaa00"
           style={{
             transformBox: 'fill-box',
             transformOrigin: 'center',
-            animation: 'blink 1.2s infinite',
+            animation: 'blink 2s infinite',
           }}
         />
       )}
@@ -298,7 +302,7 @@ function TruckNode({ truck, baysRows, powerBids, respawnEpoch = 0 }) {
           style={{
             transformBox: 'fill-box',
             transformOrigin: 'center',
-            animation: 'drift 3s ease-in-out infinite',
+            animation: `drift ${(3 * DRIFT_SECONDS_SCALE).toFixed(1)}s ease-in-out infinite`,
           }}
         />
       )}

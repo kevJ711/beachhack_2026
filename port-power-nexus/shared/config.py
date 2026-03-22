@@ -38,7 +38,10 @@ def load_orchestrator_settings() -> OrchestratorSettings:
             ),
             truck_status_agent=os.getenv(
                 "TRUCK_STATUS_AGENT_ADDRESS",
-                "agent://truck-status",
+                os.getenv(
+                    "TERMINAL_AGENT_ADDRESS",
+                    "agent1q2dsyxc0g3482s3cewzss6vf4gakd2r8znask0gpmqrnvm0p5n0fy9gsulk",
+                ),
             ),
             amazon_truck_agent=os.getenv(
                 "AMAZON_TRUCK_AGENT_ADDRESS",

@@ -11,7 +11,7 @@ function easeInOutQuad(t) {
 export default function useSmoothPosition(
   tx,
   ty,
-  durationMs = 1400,
+  durationMs = 2800,
   resetEpoch = 0,
   fromX = null,
   fromY = null

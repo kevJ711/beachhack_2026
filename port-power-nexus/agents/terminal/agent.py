@@ -1,6 +1,10 @@
+import os
+from datetime import datetime, timezone
+
 from uagents import Agent, Context
 
-from shared.models import PowerBid, BidResponse
+from shared.models import DemoHeartbeat, PowerBid, BidResponse, TruckStatusRequest, TruckStatusResponse
+from shared.truck_mapping import truck_label_to_agent_name
 from shared.supabase_client import supabase
 from agents.terminal.bay_manager import (
     DEMO_CHARGE_TICK_S,
@@ -16,10 +20,95 @@ from agents.terminal.bay_manager import (
 
 terminal = Agent(name="terminal", seed="terminal_seed")
 
+GRID_AGENT_ADDRESS = os.environ.get("GRID_AGENT_ADDRESS", "").strip()
+# Set e.g. DEMO_GRID_HEARTBEAT_S=60 and GRID_AGENT_ADDRESS to enable grid↔terminal pings.
+DEMO_GRID_HEARTBEAT_S = float(os.environ.get("DEMO_GRID_HEARTBEAT_S", "0"))
+
 # Tracks bid queue position across rounds
 bid_queue = []
 # In-memory bay lock: bay_id -> truck_id (source of truth for this round)
 _locked_bays: dict[str, str] = {}
+
+_KNOWN_FLEET_NAMES = frozenset(
+    {"amazon_truck", "fedex_truck", "ups_truck", "dhl_truck", "rivian_truck"}
+)
+
+
+def _fleet_name_for_status_query(truck_id: str) -> str | None:
+    """Orchestrator sends Truck_01 … or fleet names — map to DB `trucks.name`."""
+    mapped = truck_label_to_agent_name(truck_id)
+    if mapped:
+        return mapped
+    tid = (truck_id or "").strip()
+    if tid in _KNOWN_FLEET_NAMES:
+        return tid
+    return None
+
+
+@terminal.on_message(model=TruckStatusRequest, allow_unverified=True)
+async def handle_truck_status_request(ctx: Context, sender: str, msg: TruckStatusRequest) -> None:
+    """Answer orchestrator status queries from Supabase (no separate truck-status agent required)."""
+    fleet = _fleet_name_for_status_query(msg.truck_id)
+    if not fleet:
+        await ctx.send(
+            msg.reply_to,
+            TruckStatusResponse(
+                request_id=msg.request_id,
+                truck_id=msg.truck_id,
+                truck_status="unknown",
+                state_of_charge=None,
+                distance_to_port=None,
+                bay=None,
+                timestamp=datetime.now(timezone.utc),
+            ),
+        )
+        ctx.logger.warning(f"Terminal: status request for unrecognized truck id {msg.truck_id!r}")
+        return
+
+    row = (
+        supabase.table("trucks")
+        .select("state_of_charge,distance_to_port,status,bay_id,name")
+        .eq("name", fleet)
+        .limit(1)
+        .execute()
+    )
+    if not row.data:
+        await ctx.send(
+            msg.reply_to,
+            TruckStatusResponse(
+                request_id=msg.request_id,
+                truck_id=msg.truck_id,
+                truck_status="not_in_hub",
+                state_of_charge=None,
+                distance_to_port=None,
+                bay=None,
+                timestamp=datetime.now(timezone.utc),
+            ),
+        )
+        ctx.logger.warning(f"Terminal: no truck row for fleet name {fleet!r}")
+        return
+
+    t = row.data[0]
+    bay_label: str | None = None
+    bid = t.get("bay_id")
+    if bid:
+        br = supabase.table("bays").select("name").eq("id", bid).limit(1).execute()
+        if br.data:
+            bay_label = br.data[0].get("name")
+
+    await ctx.send(
+        msg.reply_to,
+        TruckStatusResponse(
+            request_id=msg.request_id,
+            truck_id=msg.truck_id,
+            truck_status=str(t.get("status") or "idle"),
+            state_of_charge=float(t["state_of_charge"]) if t.get("state_of_charge") is not None else None,
+            distance_to_port=float(t["distance_to_port"]) if t.get("distance_to_port") is not None else None,
+            bay=bay_label,
+            timestamp=datetime.now(timezone.utc),
+        ),
+    )
+    ctx.logger.info(f"Terminal: truck status for {msg.truck_id} ({fleet}) → {t.get('status')}")
 
 
 @terminal.on_event("startup")
@@ -124,6 +213,16 @@ async def demo_charging_tick(ctx: Context) -> None:
                 del _locked_bays[bay_id]
     except Exception as e:
         ctx.logger.warning(f"Terminal: charging tick failed — {e}")
+
+
+if DEMO_GRID_HEARTBEAT_S > 0 and GRID_AGENT_ADDRESS:
+
+    @terminal.on_interval(period=DEMO_GRID_HEARTBEAT_S)
+    async def demo_grid_heartbeat(ctx: Context) -> None:
+        try:
+            await ctx.send(GRID_AGENT_ADDRESS, DemoHeartbeat(msg="terminal_ping"))
+        except Exception as e:
+            ctx.logger.debug(f"Terminal: grid heartbeat skipped — {e}")
 
 
 if __name__ == "__main__":

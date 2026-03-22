@@ -13,6 +13,8 @@ class GridSignal(Model):
     grid_stress: float        # 0.0–1.0
     ca_iso_zone: str
     timestamp: str
+    # If set (e.g. amazon_truck), only that agent may bid; None = all trucks in this auction.
+    invited_truck_name: Optional[str] = None
 
 
 class PowerBid(Model):
@@ -89,4 +91,15 @@ class AgentErrorResponse(Model):
     source_agent: str
     error_message: str
     timestamp: datetime
+
+
+class AuctionComplete(Model):
+    """Grid → Trucks: auction ended."""
+    auction_id: str
+    reason: str
+
+
+class DemoHeartbeat(Model):
+    """Optional Terminal ↔ Grid liveness ping (local demo)."""
+    msg: str = "ping"
 

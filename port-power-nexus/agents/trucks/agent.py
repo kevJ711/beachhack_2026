@@ -1,6 +1,6 @@
 import random
 from uagents import Agent, Context, Bureau
-from shared.models import GridSignal, PowerBid, BidResponse
+from shared.models import AuctionComplete, GridSignal, PowerBid, BidResponse
 from shared.supabase_client import supabase
 from agents.trucks.bidding import decide_bid
 from datetime import datetime
@@ -61,12 +61,11 @@ def _randomize_truck(truck_name: str, battery_ref: list) -> dict:
     hours_until_deadline = random.randint(20, 120)  # 20-120 minutes until departure
     destination = random.choice(DESTINATIONS)
     battery_ref[0] = float(soc)
+    # Core columns only — destination / hours_until_deadline require DB migration (see supabase/).
     supabase.table("trucks").update({
         "state_of_charge": soc,
         "distance_to_port": distance,
         "status": "idle",
-        "destination": destination,
-        "hours_until_deadline": hours_until_deadline,
     }).eq("name", truck_name).execute()
     return {"hours_until_deadline": hours_until_deadline, "destination": destination}
 
@@ -106,6 +105,14 @@ def _calc_requested_kwh(battery_level: float, destination: str) -> float:
 
 def _make_on_grid(truck_name: str, requested_kwh: float, battery_ref: list, meta_ref: dict):
     async def _on_grid(ctx: Context, sender: str, signal: GridSignal):
+        invited = getattr(signal, "invited_truck_name", None)
+        if invited and invited != truck_name:
+            ctx.logger.info(
+                f"{truck_name}: skipping auction {signal.auction_id} — "
+                f"invited fleet agent is {invited}"
+            )
+            return
+
         battery_ref[0], distance = _truck_state_from_hub(truck_name, battery_ref[0])
         balance = _get_balance(truck_name)
         destination = meta_ref.get("destination", "Unknown")
@@ -131,6 +138,13 @@ def _make_on_grid(truck_name: str, requested_kwh: float, battery_ref: list, meta
         ctx.logger.info(f"{truck_name}: bidding ${result['bid_price']:.2f}/kWh — {result['reasoning']}")
         await ctx.send(TERMINAL_ADDRESS, bid)
     return _on_grid
+
+
+def _make_on_auction_complete(truck_name: str):
+    async def _on_complete(ctx: Context, sender: str, msg: AuctionComplete) -> None:
+        ctx.logger.info(f"{truck_name}: auction {msg.auction_id} finished ({msg.reason})")
+
+    return _on_complete
 
 
 def _make_on_response(truck_name: str, battery_ref: list, meta_ref: dict):
@@ -169,6 +183,7 @@ for _name, _seed, _port in _TRUCKS:
 
     _agent.on_event("startup")(_make_startup(_name, _batt, _meta))
     _agent.on_message(model=GridSignal)(_make_on_grid(_name, 0, _batt, _meta))
+    _agent.on_message(model=AuctionComplete)(_make_on_auction_complete(_name))
     _agent.on_message(model=BidResponse)(_make_on_response(_name, _batt, _meta))
 
     _agents[_name] = _agent

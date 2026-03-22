@@ -1,3 +1,4 @@
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -6,8 +7,9 @@ from typing import Literal, Optional
 from uuid import uuid4
 
 from uagents import Agent, Context, Model
-from uagents.types import DeliveryStatus
+from uagents_core.types import DeliveryStatus
 
+from agents.orchestrator.protocols.chat import chat_protocol, swarm_protocol
 from shared.config import load_orchestrator_settings
 from shared.models import (
     AgentErrorResponse,
@@ -51,18 +53,27 @@ PENDING_INDEX_KEY = "pending_request_ids"
 
 SETTINGS = load_orchestrator_settings()
 
+ORCHESTRATOR_PORT = int(os.environ.get("ORCHESTRATOR_PORT", "8002"))
+
 orchestrator_agent = Agent(
     name="Logistics_Orchestrator",
-    seed="logistics_orchestrator_seed",
-    port=8010,
+    seed="logistics_orchestrator_seed_four",
+    
+    port=ORCHESTRATOR_PORT,
     mailbox=True,
 )
+orchestrator_agent.include(chat_protocol, publish_manifest=True)
+orchestrator_agent.include(swarm_protocol, publish_manifest=True)
 
 
 def parse_command(message: str) -> ParsedCommand:
     lowered = message.lower()
     truck_id = normalize_truck_id(message)
     goal = extract_goal(message)
+
+    if "start auction" in lowered:
+        tid = truck_id if truck_id else "all"
+        return ParsedCommand("start_auction_for_truck", tid, goal, message)
 
     if truck_id and any(word in lowered for word in STATUS_KEYWORDS):
         return ParsedCommand("get_truck_status", truck_id, goal, message)
@@ -99,8 +110,8 @@ def format_unknown_response(command: ParsedCommand) -> str:
     )
     return (
         "I can coordinate charging requests for the Port-Power Nexus swarm."
-        f"{truck_hint} Try: \"what is the status of Truck_02\" or "
-        "\"find the cleanest charging slot for Truck_07\"."
+        f"{truck_hint} Try: \"start auction\" (whole fleet), "
+        "\"start auction for Truck_01\" (one truck), or \"what is the status of Truck_02\"."
     )
 
 
@@ -216,7 +227,10 @@ def parsed_command_from_pending(pending: dict) -> ParsedCommand:
 
 
 async def route_command(ctx: Context, sender: str, command: ParsedCommand) -> str:
-    if command.intent == "unknown" or not command.target_truck:
+    if command.intent == "unknown":
+        return format_unknown_response(command)
+
+    if command.intent == "get_truck_status" and not command.target_truck:
         return format_unknown_response(command)
 
     if command.intent == "get_truck_status":
@@ -265,8 +279,13 @@ async def route_command(ctx: Context, sender: str, command: ParsedCommand) -> st
             f"Details: {status.detail}."
         )
     save_pending_request(ctx, request_id, sender, command)
+    scope = (
+        "all trucks"
+        if (command.target_truck or "").lower() == "all"
+        else command.target_truck
+    )
     return (
-        f"I've asked the Grid Agent to start an auction for {command.target_truck}. "
+        f"I've asked the Grid Agent to start an auction for {scope}. "
         "I will format the bay assignment, reasoning, and TX hash as soon as the swarm replies."
     )
 
@@ -294,93 +313,6 @@ async def handle_chat(ctx: Context, sender: str, msg: OrchestratorChatMessage):
     command = parse_command(cleaned)
     reply = await route_command(ctx, sender, command)
     await ctx.send(sender, OrchestratorChatResponse(message=reply))
-
-
-@orchestrator_agent.on_message(model=AuctionStarted, allow_unverified=True)
-async def handle_auction_started(ctx: Context, sender: str, msg: AuctionStarted):
-    pending = get_pending_request(ctx, msg.request_id)
-    ctx.logger.info(
-        f"auction_started sender={sender} truck={msg.truck_id} status={msg.status}"
-    )
-    if not pending:
-        return
-    update_pending_stage(ctx, msg.request_id, "auction_started")
-    await ctx.send(
-        pending["sender"],
-        OrchestratorChatResponse(
-            message=(
-                f"Auction started for {msg.truck_id}. "
-                f"{msg.note}"
-            )
-        ),
-    )
-
-
-@orchestrator_agent.on_message(model=TruckStatusResponse, allow_unverified=True)
-async def handle_truck_status_response(ctx: Context, sender: str, msg: TruckStatusResponse):
-    ctx.logger.info(
-        f"truck_status_response sender={sender} truck={msg.truck_id} status={msg.truck_status}"
-    )
-    pending = get_pending_request(ctx, msg.request_id)
-    if not pending:
-        return
-    await ctx.send(
-        pending["sender"],
-        OrchestratorChatResponse(message=format_truck_status_response(msg)),
-    )
-    remove_pending_request(ctx, msg.request_id)
-
-
-@orchestrator_agent.on_message(model=FinalAssignmentResponse, allow_unverified=True)
-async def handle_final_assignment(ctx: Context, sender: str, msg: FinalAssignmentResponse):
-    ctx.logger.info(
-        f"final_assignment sender={sender} truck={msg.truck_id} status={msg.status}"
-    )
-    pending = get_pending_request(ctx, msg.request_id)
-    if not pending:
-        return
-    command = parsed_command_from_pending(pending)
-    await ctx.send(
-        pending["sender"],
-        OrchestratorChatResponse(
-            message=format_assignment_response(msg, command.requested_goal)
-        ),
-    )
-    remove_pending_request(ctx, msg.request_id)
-
-
-@orchestrator_agent.on_message(model=AgentErrorResponse, allow_unverified=True)
-async def handle_agent_error(ctx: Context, sender: str, msg: AgentErrorResponse):
-    ctx.logger.info(
-        f"agent_error sender={sender} source={msg.source_agent} detail={msg.error_message}"
-    )
-    pending = get_pending_request(ctx, msg.request_id)
-    if not pending:
-        return
-    await ctx.send(
-        pending["sender"],
-        OrchestratorChatResponse(message=format_error_response(msg)),
-    )
-    remove_pending_request(ctx, msg.request_id)
-
-
-@orchestrator_agent.on_interval(period=5.0)
-async def timeout_pending_requests(ctx: Context):
-    pending_ids = list(ctx.storage.get(PENDING_INDEX_KEY) or [])
-    now = time.time()
-    for request_id in pending_ids:
-        pending = get_pending_request(ctx, request_id)
-        if not pending:
-            remove_pending_request(ctx, request_id)
-            continue
-        if pending.get("expires_at", now + 1) > now:
-            continue
-        command = parsed_command_from_pending(pending)
-        await ctx.send(
-            pending["sender"],
-            OrchestratorChatResponse(message=format_timeout_response(command)),
-        )
-        remove_pending_request(ctx, request_id)
 
 
 if __name__ == "__main__":
