@@ -16,10 +16,7 @@ from shared.models import (
     StartAuctionRequest,
 )
 
-# ---------------------------------------------------------------------------
-# Config — set these in your .env
-# ---------------------------------------------------------------------------
-SUPABASE_URL: str = os.environ["SUPABASE_URL"]
+sSUPABASE_URL: str = os.environ["SUPABASE_URL"]
 SUPABASE_KEY: str = os.environ["SUPABASE_KEY"]
 
 # Truck agent addresses — fill in after each truck agent is registered
@@ -37,9 +34,6 @@ AUCTION_MIN_PRICE: float   = float(os.environ.get("AUCTION_MIN_PRICE",   "0.08")
 AUCTION_PRICE_STEP: float  = float(os.environ.get("AUCTION_PRICE_STEP",  "0.01"))   # drop per tick
 AUCTION_TICK_SECONDS: int  = int(os.environ.get("AUCTION_TICK_SECONDS",  "5"))
 
-# ---------------------------------------------------------------------------
-# Shared message models (must match shared/models.py used by truck agents)
-# ---------------------------------------------------------------------------
 
 class GridSignal(Model):
     """Broadcast from Grid Agent → Truck Agents every tick."""
@@ -59,9 +53,6 @@ class AuctionComplete(Model):
     reason:     str   # "price_floor_reached" | "bid_accepted"
 
 
-# ---------------------------------------------------------------------------
-# Supabase helpers
-# ---------------------------------------------------------------------------
 
 def get_supabase() -> Client:
     return create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -80,9 +71,6 @@ def log_event(sb: Client, event_type: str, message: str) -> None:
     }).execute()
 
 
-# ---------------------------------------------------------------------------
-# GridStatus API helpers
-# ---------------------------------------------------------------------------
 
 def _gridstatus_headers() -> dict:
     headers = {"Content-Type": "application/json"}
@@ -187,23 +175,17 @@ def fetch_grid_data() -> dict:
     return _grid_cache
 
 
-# ---------------------------------------------------------------------------
-# Agent definition
-# ---------------------------------------------------------------------------
-
 grid_agent = Agent(
     name     = "grid_agent",
     seed     = os.environ.get("GRID_AGENT_SEED", "grid_agent_secret_seed"),
-    endpoint = os.environ.get("GRID_AGENT_ENDPOINT", "http://127.0.0.1:8001/submit"),
     port     = int(os.environ.get("GRID_AGENT_PORT", "8001")),
+    endpoint = os.environ.get("GRID_AGENT_ENDPOINT") or None,
+    mailbox  = os.environ.get("GRID_AGENT_USE_MAILBOX", "true").lower() in {"1", "true", "yes", "on"},
 )
 
 fund_agent_if_low(grid_agent.wallet.address())
 
 
-# ---------------------------------------------------------------------------
-# Auction state (in-memory; Supabase is source of truth for frontend)
-# ---------------------------------------------------------------------------
 
 class AuctionState:
     def __init__(self) -> None:
@@ -232,10 +214,6 @@ class AuctionState:
 
 _state = AuctionState()
 
-
-# ---------------------------------------------------------------------------
-# Startup: create a fresh auction row in Supabase
-# ---------------------------------------------------------------------------
 
 @grid_agent.on_event("startup")
 async def on_startup(ctx: Context) -> None:
@@ -307,10 +285,6 @@ async def on_start_auction_request(ctx: Context, sender: str, msg: StartAuctionR
     )
 
 
-# ---------------------------------------------------------------------------
-# Main tick: every AUCTION_TICK_SECONDS seconds
-# ---------------------------------------------------------------------------
-
 @grid_agent.on_interval(period=AUCTION_TICK_SECONDS)
 async def auction_tick(ctx: Context) -> None:
     if not _state.active:
@@ -363,9 +337,6 @@ async def auction_tick(ctx: Context) -> None:
         await _end_auction(ctx, reason="price_floor_reached")
 
 
-# ---------------------------------------------------------------------------
-# Listen for a "bid accepted" notification from the Terminal Agent
-# ---------------------------------------------------------------------------
 
 class BidAccepted(Model):
     """Terminal Agent → Grid Agent: a truck won the auction."""
@@ -414,10 +385,6 @@ async def on_bid_accepted(ctx: Context, sender: str, msg: BidAccepted) -> None:
     await _end_auction(ctx, reason="bid_accepted")
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 async def _end_auction(ctx: Context, reason: str) -> None:
     """Mark auction complete, update Supabase, notify all trucks."""
     if not _state.active:
@@ -451,10 +418,6 @@ async def _end_auction(ctx: Context, reason: str) -> None:
 
     ctx.logger.info(f"[GridAgent] Auction {_state.auction_id} ended — {reason}")
 
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     grid_agent.run()
