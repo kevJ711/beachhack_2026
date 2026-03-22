@@ -1,6 +1,9 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useRef } from 'react'
 import useRealtimeTable from '../hooks/useRealtimeTable'
 
+/**
+ * Mirrors `events` rows written by the Grid Agent (auction_start, win, etc.).
+ */
 const styles = `
   @keyframes fadeIn {
     from { opacity: 0; }
@@ -8,45 +11,27 @@ const styles = `
   }
 `
 
-function lineColor(kind, accepted) {
-  if (kind === 'bid') return '#00aaff'
-  if (kind === 'response') {
-    return accepted ? '#00ff88' : '#ffaa00'
+function lineColor(type) {
+  switch (type) {
+    case 'bid':
+      return '#00aaff'
+    case 'win':
+      return '#00ff88'
+    case 'payment':
+      return '#ffaa00'
+    case 'auction_start':
+      return '#c8d4e8'
+    default:
+      return '#c8d4e8'
   }
-  return '#c8d4e8'
 }
 
 export default function ActivityConsole() {
-  const { rows: powerBids } = useRealtimeTable('power_bids', {
+  const { rows } = useRealtimeTable('events', {
     orderBy: 'created_at',
     orderAscending: false,
-    limit: 60,
+    limit: 40,
   })
-
-  const { rows: bidResponses } = useRealtimeTable('bid_responses', {
-    orderBy: 'created_at',
-    orderAscending: false,
-    limit: 60,
-  })
-
-  const rows = useMemo(() => {
-    const bidRows = (powerBids ?? []).map((b) => ({
-      key: `bid-${b.id}`,
-      created_at: b.created_at,
-      kind: 'bid',
-      payload: b,
-    }))
-    const resRows = (bidResponses ?? []).map((r) => ({
-      key: `res-${r.id}`,
-      created_at: r.created_at,
-      kind: 'response',
-      payload: r,
-    }))
-    return [...bidRows, ...resRows].sort(
-      (a, b) =>
-        new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-    ).slice(0, 40)
-  }, [powerBids, bidResponses])
 
   const scrollRef = useRef(null)
 
@@ -93,51 +78,23 @@ export default function ActivityConsole() {
           padding: '0 12px 4px',
         }}
       >
-        {reversed.map((row) => {
-          const t = new Date(row.created_at).toLocaleTimeString('en-US', {
+        {reversed.map((event) => {
+          const t = new Date(event.created_at).toLocaleTimeString('en-US', {
             hour12: false,
           })
-          if (row.kind === 'bid') {
-            const b = row.payload
-            const price =
-              b.bid_price != null ? Number(b.bid_price).toFixed(2) : '—'
-            const reason = b.reasoning
-              ? String(b.reasoning).slice(0, 80)
-              : ''
-            return (
-              <div
-                key={row.key}
-                style={{
-                  fontSize: 10,
-                  lineHeight: 1.8,
-                  fontFamily: 'Courier New, monospace',
-                  color: lineColor('bid'),
-                  animation: 'fadeIn 0.4s ease-in',
-                }}
-              >
-                [{t}] BID: ${price} · {reason}
-              </div>
-            )
-          }
-          const r = row.payload
-          const accepted = r.accepted === true
-          const label = accepted ? 'ACCEPT' : 'REJECT'
-          const price =
-            r.price_confirmed != null
-              ? Number(r.price_confirmed).toFixed(2)
-              : '—'
+          const type = (event.type ?? '').toUpperCase()
           return (
             <div
-              key={row.key}
+              key={event.id}
               style={{
                 fontSize: 10,
                 lineHeight: 1.8,
                 fontFamily: 'Courier New, monospace',
-                color: lineColor('response', accepted),
+                color: lineColor(event.type),
                 animation: 'fadeIn 0.4s ease-in',
               }}
             >
-              [{t}] {label}: ${price} · queue {r.queue_position ?? '—'}
+              [{t}] {type}: {event.message}
             </div>
           )
         })}

@@ -1,3 +1,5 @@
+import shared.env_loader  # noqa: F401 — repo root .env
+
 import os
 from dataclasses import dataclass
 
