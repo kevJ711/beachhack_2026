@@ -6,3 +6,8 @@ __pycache__/
 node_modules/
 frontend/dist/
 frontend/.vite/
+
+pnpm-lock.yaml
+/node_modules
+/.bhacks
+/frontend/node_modules

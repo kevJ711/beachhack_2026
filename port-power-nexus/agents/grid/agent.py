@@ -1,9 +1,11 @@
 import os
 import asyncio
 import requests
+from dotenv import load_dotenv
 import uuid
 from datetime import datetime, timezone
 
+load_dotenv()
 import shared.env_loader  # noqa: F401 — repo root .env
 
 from supabase import create_client, Client
@@ -18,7 +20,7 @@ from shared.models import (
 )
 
 SUPABASE_URL: str = os.environ["SUPABASE_URL"]
-SUPABASE_KEY: str = os.environ["SUPABASE_KEY"]
+SUPABASE_KEY: str = os.environ["SUPABASE_ANON_KEY"]
 
 # Truck agent addresses — fill in after each truck agent is registered
 TRUCK_AGENT_ADDRESSES: list[str] = os.environ.get(
@@ -34,13 +36,6 @@ AUCTION_START_PRICE: float = float(os.environ.get("AUCTION_START_PRICE", "0.35")
 AUCTION_MIN_PRICE: float   = float(os.environ.get("AUCTION_MIN_PRICE",   "0.08"))   # $/kWh
 AUCTION_PRICE_STEP: float  = float(os.environ.get("AUCTION_PRICE_STEP",  "0.01"))   # drop per tick
 AUCTION_TICK_SECONDS: int  = int(os.environ.get("AUCTION_TICK_SECONDS",  "5"))
-GRID_AGENT_USE_MAILBOX: bool = os.environ.get(
-    "GRID_AGENT_USE_MAILBOX", "true"
-).lower() in {"1", "true", "yes", "on"}
-GRID_AGENT_ENDPOINT: str | None = None if GRID_AGENT_USE_MAILBOX else (
-    os.environ.get("GRID_AGENT_ENDPOINT") or None
-)
-
 
 # GridSignal imported from shared.models — both sides must use the same class.
 
@@ -90,6 +85,9 @@ def fetch_caiso_fuel_mix() -> dict:
             params={"limit": 1, "order_by": "interval_start_utc desc"},
             timeout=8,
         )
+        if resp.status_code == 429:
+            print("[GridAgent] GridStatus rate-limited (429) — using defaults")
+            return {"renewable_pct": 0.1, "ca_iso_zone": "CAISO", "raw_row": {}}
         resp.raise_for_status()
         data = resp.json()
 
@@ -134,6 +132,9 @@ def fetch_caiso_load() -> dict:
             params={"limit": 1, "order_by": "interval_start_utc desc"},
             timeout=8,
         )
+        if resp.status_code == 429:
+            print("[GridAgent] GridStatus rate-limited (429) — using defaults")
+            return {"grid_stress": 0.5, "load_mw": 0}
         resp.raise_for_status()
         data = resp.json()
 
@@ -173,14 +174,14 @@ def fetch_grid_data() -> dict:
 
 
 grid_agent = Agent(
-    name     = "grid_agent",
-    seed     = os.environ.get("GRID_AGENT_SEED", "grid_agent_secret_seed"),
-    port     = int(os.environ.get("GRID_AGENT_PORT", "8001")),
-    endpoint = GRID_AGENT_ENDPOINT,
-    mailbox  = GRID_AGENT_USE_MAILBOX,
+    name = "grid_agent",
+    seed = os.environ.get("GRID_AGENT_SEED", "grid_agent_secret_seed"),
 )
 
-fund_agent_if_low(grid_agent.wallet.address())
+try:
+    fund_agent_if_low(grid_agent.wallet.address())
+except Exception as _e:
+    print(f"[GridAgent] Skipping wallet funding (local Bureau mode): {_e}")
 
 
 
@@ -233,8 +234,7 @@ async def on_startup(ctx: Context) -> None:
     log_event(sb, "auction_start", f"Dutch auction {_state.auction_id} started at ${AUCTION_START_PRICE}/kWh")
 
     ctx.logger.info(
-        f"[GridAgent] Auction {_state.auction_id} started. "
-        f"address={ctx.agent.address} mailbox={GRID_AGENT_USE_MAILBOX} endpoint={GRID_AGENT_ENDPOINT}"
+        f"[GridAgent] Auction {_state.auction_id} started. address={ctx.agent.address}"
     )
 
 

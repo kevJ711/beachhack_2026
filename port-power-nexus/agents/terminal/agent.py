@@ -14,7 +14,7 @@ from agents.terminal.bay_manager import (
     update_truck_status,
 )
 
-terminal = Agent(name="terminal", seed="terminal_seed", port=8010, endpoint=["http://localhost:8010/submit"])
+terminal = Agent(name="terminal", seed="terminal_seed")
 
 # Tracks bid queue position across rounds
 bid_queue = []

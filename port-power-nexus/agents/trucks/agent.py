@@ -29,6 +29,10 @@ def stress_label(stress: float) -> str:
         return "medium"
     return "high"
 
+# --- 3 trucks from different companies, each with private battery state ---
+truck1 = Agent(name="amazon_truck", seed="amazon_truck_seed")
+truck2 = Agent(name="fedex_truck", seed="fedex_truck_seed")
+truck3 = Agent(name="ups_truck", seed="ups_truck_seed")
 
 def _update_balance(truck_name: str, balance_atestfet: int) -> None:
     supabase.table("trucks").update({"balance": balance_atestfet}).eq("name", truck_name).execute()
