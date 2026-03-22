@@ -24,7 +24,10 @@ protocol = Protocol(spec=chat_protocol_spec)
 
 IntentType = Literal["start_auction_for_truck", "get_truck_status", "unknown"]
 
-GRID_AGENT_ADDRESS = os.getenv("GRID_AGENT_ADDRESS", "agent://grid")
+GRID_AGENT_ADDRESS = os.getenv(
+    "GRID_AGENT_ADDRESS",
+    "agent1qdrkj8c6caq7tdmk04r3277ekaukfg7ztxncx0alpddflgz995k4xun8nut",
+)
 TERMINAL_AGENT_ADDRESS = os.getenv(
     "TERMINAL_AGENT_ADDRESS",
     "agent1q2dsyxc0g3482s3cewzss6vf4gakd2r8znask0gpmqrnvm0p5n0fy9gsulk",
