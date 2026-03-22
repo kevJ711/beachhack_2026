@@ -26,23 +26,28 @@ function TruckCard({ truck, baysRows }) {
   else if (soc <= 60) barColor = '#cc8800'
 
   return (
-    <div style={{ background: '#0a0e1a', border: `1px solid ${borderColor}`, borderRadius: 4, padding: 8 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-        <span style={{ color: '#c8d4e8', fontSize: 10, letterSpacing: 1, fontFamily: 'Courier New, monospace' }}>
+    <div style={{ background: '#0a0e1a', border: `1px solid ${borderColor}`, borderRadius: 4, padding: 10 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+        <span style={{ color: '#c8d4e8', fontSize: 13, letterSpacing: 1, fontFamily: 'Courier New, monospace', fontWeight: 'bold' }}>
           {truck.name}
         </span>
-        <span style={{ fontSize: 8, padding: '1px 5px', borderRadius: 2, letterSpacing: 1, fontFamily: 'Courier New, monospace', background: badgeBg, color: badgeColor }}>
+        <span style={{ fontSize: 11, padding: '2px 6px', borderRadius: 2, letterSpacing: 1, fontFamily: 'Courier New, monospace', background: badgeBg, color: badgeColor }}>
           {label}
         </span>
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <div style={{ flex: 1, height: 4, background: '#1a2a3a', borderRadius: 2, overflow: 'hidden' }}>
-          <div style={{ width: `${soc}%`, height: 4, background: barColor, borderRadius: 2 }} />
+        <div style={{ flex: 1, height: 6, background: '#1a2a3a', borderRadius: 2, overflow: 'hidden' }}>
+          <div style={{ width: `${soc}%`, height: 6, background: barColor, borderRadius: 2 }} />
         </div>
-        <span style={{ fontSize: 9, color: '#6a8aaa', fontFamily: 'Courier New, monospace' }}>
+        <span style={{ fontSize: 12, color: '#6a8aaa', fontFamily: 'Courier New, monospace' }}>
           {formatSocPercent(socSmooth)}
         </span>
       </div>
+      {truck.balance != null && (
+        <div style={{ marginTop: 6, fontSize: 11, color: '#00ff88', fontFamily: 'Courier New, monospace', letterSpacing: 1 }}>
+          ₮ {Number(truck.balance).toLocaleString()} atestfet
+        </div>
+      )}
     </div>
   )
 }
@@ -61,7 +66,7 @@ export default function TruckLeaderboard({ demoTruck }) {
   return (
     <aside
       style={{
-        width: 220,
+        width: 260,
         flexShrink: 0,
         background: '#0d1225',
         borderLeft: '1px solid #1a3a5c',
@@ -72,9 +77,9 @@ export default function TruckLeaderboard({ demoTruck }) {
       <div
         style={{
           color: '#00aaff',
-          fontSize: 9,
+          fontSize: 12,
           letterSpacing: 2,
-          padding: '10px 12px',
+          padding: '12px 14px',
           borderBottom: '1px solid #1a3a5c',
           flexShrink: 0,
           fontFamily: 'Courier New, monospace',

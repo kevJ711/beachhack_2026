@@ -12,6 +12,7 @@ create table if not exists public.trucks (
   distance_to_port integer default 0,
   status text not null default 'idle',
   bay_id uuid,
+  balance numeric not null default 0,
   last_updated timestamptz default now()
 );
 

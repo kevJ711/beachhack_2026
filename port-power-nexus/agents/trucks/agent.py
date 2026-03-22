@@ -10,7 +10,6 @@ TERMINAL_WALLET = "fetch1xz6mhfxl79l47r3x5n4lclrfs46rr8k26g9yt7"  # terminal age
 
 
 def _soc_from_hub(truck_name: str, fallback: float) -> float:
-    """Match Supabase `trucks.state_of_charge` (terminal updates while charging)."""
     r = (
         supabase.table("trucks")
         .select("state_of_charge")
@@ -30,169 +29,103 @@ def stress_label(stress: float) -> str:
         return "medium"
     return "high"
 
-# --- 3 trucks from different companies, each with private battery state ---
-truck1 = Agent(name="amazon_truck", seed="amazon_truck_seed", port=8011, endpoint=["http://localhost:8000/submit"])
-truck2 = Agent(name="fedex_truck", seed="fedex_truck_seed", port=8012, endpoint=["http://localhost:8000/submit"])
-truck3 = Agent(name="ups_truck", seed="ups_truck_seed", port=8013, endpoint=["http://localhost:8000/submit"])
 
-# Private battery levels — not shared with competitors
-amazon_battery = 20.0
-fedex_battery = 55.0
-ups_battery = 80.0
+def _update_balance(truck_name: str, balance_atestfet: int) -> None:
+    supabase.table("trucks").update({"balance": balance_atestfet}).eq("name", truck_name).execute()
 
 
-# ─────────────────────────── STARTUP: fund wallets ───────────────────────────
-
-@truck1.on_event("startup")
-async def amazon_startup(ctx: Context):
-    fund_agent_if_low(ctx.wallet.address())
-    balance = ctx.ledger.query_bank_balance(ctx.wallet.address())
-    ctx.logger.info(f"Amazon wallet: {ctx.wallet.address()} | balance: {balance}")
-
-@truck2.on_event("startup")
-async def fedex_startup(ctx: Context):
-    fund_agent_if_low(ctx.wallet.address())
-    balance = ctx.ledger.query_bank_balance(ctx.wallet.address())
-    ctx.logger.info(f"FedEx wallet: {ctx.wallet.address()} | balance: {balance}")
-
-@truck3.on_event("startup")
-async def ups_startup(ctx: Context):
-    fund_agent_if_low(ctx.wallet.address())
-    balance = ctx.ledger.query_bank_balance(ctx.wallet.address())
-    ctx.logger.info(f"UPS wallet: {ctx.wallet.address()} | balance: {balance}")
+def _make_startup(agent: Agent, truck_name: str):
+    async def _startup(ctx: Context):
+        fund_agent_if_low(agent.wallet.address())
+        balance = ctx.ledger.query_bank_balance(agent.wallet.address())
+        _update_balance(truck_name, int(balance))
+        ctx.logger.info(f"{truck_name} wallet: {agent.wallet.address()} | balance: {balance} atestfet")
+    return _startup
 
 
-# ─────────────────────────── AMAZON ───────────────────────────
-
-@truck1.on_message(model=GridSignal)
-async def amazon_on_grid(ctx: Context, sender: str, signal: GridSignal):
-    global amazon_battery
-    amazon_battery = _soc_from_hub("amazon_truck", amazon_battery)
-    result = decide_bid(amazon_battery, signal.current_price, stress_label(signal.grid_stress))
-    bid = PowerBid(
-        truck_id="amazon_truck",
-        battery_level=amazon_battery,
-        requested_kwh=50.0,
-        bid_price=result["bid_price"],
-        reasoning=result["reasoning"],
-        timestamp=datetime.now()
-    )
-    ctx.logger.info(f"Amazon: bidding ${result['bid_price']:.2f}/kWh — {result['reasoning']}")
-    await ctx.send(TERMINAL_ADDRESS, bid)
-
-@truck1.on_message(model=BidResponse)
-async def amazon_on_response(ctx: Context, sender: str, response: BidResponse):
-    global amazon_battery
-    if response.accepted:
-        amazon_battery = _soc_from_hub("amazon_truck", amazon_battery)
-        ctx.logger.info(
-            f"Amazon: charging at bay {response.bay} — SOC {amazon_battery:.0f}% (hub)"
+def _make_on_grid(agent: Agent, truck_name: str, requested_kwh: float, battery_ref: list):
+    async def _on_grid(ctx: Context, sender: str, signal: GridSignal):
+        battery_ref[0] = _soc_from_hub(truck_name, battery_ref[0])
+        result = decide_bid(battery_ref[0], signal.current_price, stress_label(signal.grid_stress))
+        bid = PowerBid(
+            truck_id=truck_name,
+            battery_level=battery_ref[0],
+            requested_kwh=requested_kwh,
+            bid_price=result["bid_price"],
+            reasoning=result["reasoning"],
+            timestamp=datetime.now()
         )
-        cost_atestfet = int(response.price_confirmed * 50.0 * 1_000_000)  # requested_kwh=50
-        try:
-            await ctx.ledger.send_tokens(
-                destination=TERMINAL_WALLET,
-                amount=cost_atestfet,
-                denom="atestfet",
-                sender=ctx.wallet,
-                memo=f"charge-amazon_truck-{response.bay}",
-            )
-            ctx.logger.info(f"Amazon: paid {cost_atestfet} atestfet to terminal")
-        except Exception as e:
-            ctx.logger.warning(f"Amazon: payment failed — {e}")
-    else:
-        ctx.logger.info(f"Amazon: rejected, queue position {response.queue_position}")
+        ctx.logger.info(f"{truck_name}: bidding ${result['bid_price']:.2f}/kWh — {result['reasoning']}")
+        await ctx.send(TERMINAL_ADDRESS, bid)
+    return _on_grid
 
 
-# ─────────────────────────── FEDEX ───────────────────────────
-
-@truck2.on_message(model=GridSignal)
-async def fedex_on_grid(ctx: Context, sender: str, signal: GridSignal):
-    global fedex_battery
-    fedex_battery = _soc_from_hub("fedex_truck", fedex_battery)
-    result = decide_bid(fedex_battery, signal.current_price, stress_label(signal.grid_stress))
-    bid = PowerBid(
-        truck_id="fedex_truck",
-        battery_level=fedex_battery,
-        requested_kwh=40.0,
-        bid_price=result["bid_price"],
-        reasoning=result["reasoning"],
-        timestamp=datetime.now()
-    )
-    ctx.logger.info(f"FedEx: bidding ${result['bid_price']:.2f}/kWh — {result['reasoning']}")
-    await ctx.send(TERMINAL_ADDRESS, bid)
-
-@truck2.on_message(model=BidResponse)
-async def fedex_on_response(ctx: Context, sender: str, response: BidResponse):
-    global fedex_battery
-    if response.accepted:
-        fedex_battery = _soc_from_hub("fedex_truck", fedex_battery)
-        ctx.logger.info(
-            f"FedEx: charging at bay {response.bay} — SOC {fedex_battery:.0f}% (hub)"
-        )
-        cost_atestfet = int(response.price_confirmed * 40.0 * 1_000_000)  # requested_kwh=40
-        try:
-            await ctx.ledger.send_tokens(
-                destination=TERMINAL_WALLET,
-                amount=cost_atestfet,
-                denom="atestfet",
-                sender=ctx.wallet,
-                memo=f"charge-fedex_truck-{response.bay}",
-            )
-            ctx.logger.info(f"FedEx: paid {cost_atestfet} atestfet to terminal")
-        except Exception as e:
-            ctx.logger.warning(f"FedEx: payment failed — {e}")
-    else:
-        ctx.logger.info(f"FedEx: rejected, queue position {response.queue_position}")
+def _make_on_response(agent: Agent, truck_name: str, requested_kwh: float, battery_ref: list):
+    async def _on_response(ctx: Context, sender: str, response: BidResponse):
+        if response.accepted:
+            battery_ref[0] = _soc_from_hub(truck_name, battery_ref[0])
+            ctx.logger.info(f"{truck_name}: charging at bay {response.bay} — SOC {battery_ref[0]:.0f}% (hub)")
+            cost_atestfet = int(response.price_confirmed * requested_kwh * 1_000_000)
+            try:
+                ctx.ledger.send_tokens(
+                    destination=TERMINAL_WALLET,
+                    amount=cost_atestfet,
+                    denom="atestfet",
+                    sender=agent.wallet,
+                    memo=f"charge-{truck_name}-{response.bay}",
+                )
+                new_balance = ctx.ledger.query_bank_balance(agent.wallet.address())
+                _update_balance(truck_name, int(new_balance))
+                ctx.logger.info(f"{truck_name}: paid {cost_atestfet} atestfet | remaining: {new_balance}")
+            except Exception as e:
+                ctx.logger.warning(f"{truck_name}: payment failed — {e}")
+        else:
+            ctx.logger.info(f"{truck_name}: rejected, queue position {response.queue_position}")
+    return _on_response
 
 
-# ─────────────────────────── UPS ───────────────────────────
+# ─────────────────────────── TRUCK DEFINITIONS ───────────────────────────
 
-@truck3.on_message(model=GridSignal)
-async def ups_on_grid(ctx: Context, sender: str, signal: GridSignal):
-    global ups_battery
-    ups_battery = _soc_from_hub("ups_truck", ups_battery)
-    result = decide_bid(ups_battery, signal.current_price, stress_label(signal.grid_stress))
-    bid = PowerBid(
-        truck_id="ups_truck",
-        battery_level=ups_battery,
-        requested_kwh=30.0,
-        bid_price=result["bid_price"],
-        reasoning=result["reasoning"],
-        timestamp=datetime.now()
-    )
-    ctx.logger.info(f"UPS: bidding ${result['bid_price']:.2f}/kWh — {result['reasoning']}")
-    await ctx.send(TERMINAL_ADDRESS, bid)
+_TRUCKS = [
+    ("amazon_truck", "amazon_truck_seed", 8011, 50.0, 20.0),
+    ("fedex_truck",  "fedex_truck_seed",  8012, 40.0, 55.0),
+    ("ups_truck",    "ups_truck_seed",    8013, 30.0, 80.0),
+    ("dhl_truck",    "dhl_truck_seed",    8014, 45.0, 35.0),
+    ("rivian_truck", "rivian_truck_seed", 8015, 60.0, 10.0),
+]
 
-@truck3.on_message(model=BidResponse)
-async def ups_on_response(ctx: Context, sender: str, response: BidResponse):
-    global ups_battery
-    if response.accepted:
-        ups_battery = _soc_from_hub("ups_truck", ups_battery)
-        ctx.logger.info(
-            f"UPS: charging at bay {response.bay} — SOC {ups_battery:.0f}% (hub)"
-        )
-        cost_atestfet = int(response.price_confirmed * 30.0 * 1_000_000)  # requested_kwh=30
-        try:
-            await ctx.ledger.send_tokens(
-                destination=TERMINAL_WALLET,
-                amount=cost_atestfet,
-                denom="atestfet",
-                sender=ctx.wallet,
-                memo=f"charge-ups_truck-{response.bay}",
-            )
-            ctx.logger.info(f"UPS: paid {cost_atestfet} atestfet to terminal")
-        except Exception as e:
-            ctx.logger.warning(f"UPS: payment failed — {e}")
-    else:
-        ctx.logger.info(f"UPS: rejected, queue position {response.queue_position}")
+_agents = {}
+for _name, _seed, _port, _kwh, _soc in _TRUCKS:
+    _agent = Agent(name=_name, seed=_seed, port=_port, endpoint=[f"http://localhost:{_port}/submit"])
+    _batt = [_soc]
+
+    def _make_balance_poll(a: Agent, n: str):
+        async def _poll(ctx: Context):
+            try:
+                bal = ctx.ledger.query_bank_balance(a.wallet.address())
+                _update_balance(n, int(bal))
+            except Exception:
+                pass
+        return _poll
+
+    _agent.on_event("startup")(_make_startup(_agent, _name))
+    _agent.on_message(model=GridSignal)(_make_on_grid(_agent, _name, _kwh, _batt))
+    _agent.on_message(model=BidResponse)(_make_on_response(_agent, _name, _kwh, _batt))
+    _agent.on_interval(period=30.0)(_make_balance_poll(_agent, _name))
+
+    _agents[_name] = _agent
+
+truck1 = _agents["amazon_truck"]
+truck2 = _agents["fedex_truck"]
+truck3 = _agents["ups_truck"]
+truck4 = _agents["dhl_truck"]
+truck5 = _agents["rivian_truck"]
 
 
 # ─────────────────────────── RUN ───────────────────────────
 
 if __name__ == "__main__":
     bureau = Bureau()
-    bureau.add(truck1)
-    bureau.add(truck2)
-    bureau.add(truck3)
+    for _agent in _agents.values():
+        bureau.add(_agent)
     bureau.run()
