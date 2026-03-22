@@ -10,13 +10,14 @@ from supabase import create_client, Client
 from uagents import Agent, Context, Model
 from uagents.setup import fund_agent_if_low
 from shared.models import (
+    GridSignal,
     AgentErrorResponse,
     AuctionStarted,
     FinalAssignmentResponse,
     StartAuctionRequest,
 )
 
-sSUPABASE_URL: str = os.environ["SUPABASE_URL"]
+SUPABASE_URL: str = os.environ["SUPABASE_URL"]
 SUPABASE_KEY: str = os.environ["SUPABASE_KEY"]
 
 # Truck agent addresses — fill in after each truck agent is registered
@@ -41,17 +42,7 @@ GRID_AGENT_ENDPOINT: str | None = None if GRID_AGENT_USE_MAILBOX else (
 )
 
 
-class GridSignal(Model):
-    """Broadcast from Grid Agent → Truck Agents every tick."""
-    auction_id:       str
-    current_price:    float       # $/kWh, dropping each tick
-    start_price:      float
-    min_price:        float
-    renewable_pct:    float       # 0–100 %
-    grid_stress:      float       # 0.0–1.0
-    ca_iso_zone:      str         # e.g. "CAISO" or the BA name from GridStatus
-    timestamp:        str         # ISO-8601 UTC
-
+# GridSignal imported from shared.models — both sides must use the same class.
 
 class AuctionComplete(Model):
     """Sent from Grid Agent → Truck Agents when the auction ends."""
@@ -336,6 +327,7 @@ async def auction_tick(ctx: Context) -> None:
     })
 
     # 5. Broadcast to all truck agents
+    log_event(sb, "signal", f"grid_agent → trucks: price=${_state.current_price:.2f}/kWh | renewable={grid['renewable_pct']}% | stress={grid['grid_stress']:.2f}")
     for addr in TRUCK_AGENT_ADDRESSES:
         addr = addr.strip()
         if addr:

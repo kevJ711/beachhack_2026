@@ -5,10 +5,18 @@ from datetime import datetime
 
 TERMINAL_ADDRESS = "agent1q2dsyxc0g3482s3cewzss6vf4gakd2r8znask0gpmqrnvm0p5n0fy9gsulk"
 
+
+def stress_label(stress: float) -> str:
+    if stress < 0.33:
+        return "low"
+    if stress < 0.66:
+        return "medium"
+    return "high"
+
 # --- 3 trucks from different companies, each with private battery state ---
-truck1 = Agent(name="amazon_truck", seed="amazon_truck_seed", port=8001)
-truck2 = Agent(name="fedex_truck", seed="fedex_truck_seed", port=8002)
-truck3 = Agent(name="ups_truck", seed="ups_truck_seed", port=8003)
+truck1 = Agent(name="amazon_truck", seed="amazon_truck_seed", port=8011, endpoint=["http://localhost:8000/submit"])
+truck2 = Agent(name="fedex_truck", seed="fedex_truck_seed", port=8012, endpoint=["http://localhost:8000/submit"])
+truck3 = Agent(name="ups_truck", seed="ups_truck_seed", port=8013, endpoint=["http://localhost:8000/submit"])
 
 # Private battery levels — not shared with competitors
 amazon_battery = 20.0
@@ -19,8 +27,8 @@ ups_battery = 80.0
 # ─────────────────────────── AMAZON ───────────────────────────
 
 @truck1.on_message(model=GridSignal)
-async def amazon_on_grid(ctx: Context, signal: GridSignal):
-    result = decide_bid(amazon_battery, signal.price, signal.grid_stress)
+async def amazon_on_grid(ctx: Context, sender: str, signal: GridSignal):
+    result = decide_bid(amazon_battery, signal.current_price, stress_label(signal.grid_stress))
     bid = PowerBid(
         truck_id="amazon_truck",
         battery_level=amazon_battery,
@@ -33,7 +41,7 @@ async def amazon_on_grid(ctx: Context, signal: GridSignal):
     await ctx.send(TERMINAL_ADDRESS, bid)
 
 @truck1.on_message(model=BidResponse)
-async def amazon_on_response(ctx: Context, response: BidResponse):
+async def amazon_on_response(ctx: Context, sender: str, response: BidResponse):
     global amazon_battery
     if response.accepted:
         amazon_battery = min(100.0, amazon_battery + 30.0)
@@ -45,8 +53,8 @@ async def amazon_on_response(ctx: Context, response: BidResponse):
 # ─────────────────────────── FEDEX ───────────────────────────
 
 @truck2.on_message(model=GridSignal)
-async def fedex_on_grid(ctx: Context, signal: GridSignal):
-    result = decide_bid(fedex_battery, signal.price, signal.grid_stress)
+async def fedex_on_grid(ctx: Context, sender: str, signal: GridSignal):
+    result = decide_bid(fedex_battery, signal.current_price, stress_label(signal.grid_stress))
     bid = PowerBid(
         truck_id="fedex_truck",
         battery_level=fedex_battery,
@@ -59,7 +67,7 @@ async def fedex_on_grid(ctx: Context, signal: GridSignal):
     await ctx.send(TERMINAL_ADDRESS, bid)
 
 @truck2.on_message(model=BidResponse)
-async def fedex_on_response(ctx: Context, response: BidResponse):
+async def fedex_on_response(ctx: Context, sender: str, response: BidResponse):
     global fedex_battery
     if response.accepted:
         fedex_battery = min(100.0, fedex_battery + 30.0)
@@ -71,8 +79,8 @@ async def fedex_on_response(ctx: Context, response: BidResponse):
 # ─────────────────────────── UPS ───────────────────────────
 
 @truck3.on_message(model=GridSignal)
-async def ups_on_grid(ctx: Context, signal: GridSignal):
-    result = decide_bid(ups_battery, signal.price, signal.grid_stress)
+async def ups_on_grid(ctx: Context, sender: str, signal: GridSignal):
+    result = decide_bid(ups_battery, signal.current_price, stress_label(signal.grid_stress))
     bid = PowerBid(
         truck_id="ups_truck",
         battery_level=ups_battery,
@@ -85,7 +93,7 @@ async def ups_on_grid(ctx: Context, signal: GridSignal):
     await ctx.send(TERMINAL_ADDRESS, bid)
 
 @truck3.on_message(model=BidResponse)
-async def ups_on_response(ctx: Context, response: BidResponse):
+async def ups_on_response(ctx: Context, sender: str, response: BidResponse):
     global ups_battery
     if response.accepted:
         ups_battery = min(100.0, ups_battery + 30.0)

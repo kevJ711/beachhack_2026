@@ -5,10 +5,14 @@ from datetime import datetime
 
 class GridSignal(Model):
     """Grid → Trucks: broadcast current grid conditions."""
-    price: float              # current auction price $/kWh
-    grid_stress: str          # "low", "medium", "high"
+    auction_id: str
+    current_price: float      # current auction price $/kWh
+    start_price: float
+    min_price: float
     renewable_pct: float      # % of power from renewables
-    timestamp: datetime
+    grid_stress: float        # 0.0–1.0
+    ca_iso_zone: str
+    timestamp: str
 
 
 class PowerBid(Model):

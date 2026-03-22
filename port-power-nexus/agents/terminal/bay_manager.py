@@ -2,6 +2,14 @@ from shared.supabase_client import supabase
 from datetime import datetime, timezone
 
 
+def log_event(event_type: str, message: str):
+    supabase.table("events").insert({
+        "type": event_type,
+        "message": message,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }).execute()
+
+
 def get_available_bay():
     """Find the first available bay."""
     result = supabase.table("bays").select("*").eq("status", "available").limit(1).execute()

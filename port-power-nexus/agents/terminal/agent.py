@@ -1,18 +1,19 @@
 from uagents import Agent, Context
 from shared.models import PowerBid, BidResponse
 from agents.terminal.bay_manager import (
-    get_available_bay, lock_bay, save_bid, save_bid_response, update_truck_status
+    get_available_bay, lock_bay, save_bid, save_bid_response, update_truck_status, log_event
 )
 
-terminal = Agent(name="terminal", seed="terminal_seed", port=8010)
+terminal = Agent(name="terminal", seed="terminal_seed", port=8010, endpoint=["http://localhost:8010/submit"])
 
 # Tracks bid queue position across rounds
 bid_queue = []
 
 
 @terminal.on_message(model=PowerBid)
-async def handle_bid(ctx: Context, bid: PowerBid):
+async def handle_bid(ctx: Context, sender: str, bid: PowerBid):
     ctx.logger.info(f"Terminal received bid from {bid.truck_id}: ${bid.bid_price}/kWh")
+    log_event("bid", f"{bid.truck_id} → terminal: PowerBid ${bid.bid_price:.2f}/kWh | battery={bid.battery_level}% | {bid.reasoning[:80]}")
 
     # Save bid to Supabase
     bid_id = save_bid(
@@ -46,6 +47,7 @@ async def handle_bid(ctx: Context, bid: PowerBid):
                 queue_position=queue_position
             )
             ctx.logger.info(f"Terminal: {bid.truck_id} won bay {bay['name']}")
+            log_event("win", f"terminal → {bid.truck_id}: ACCEPTED bay={bay['name']} at ${bid.bid_price:.2f}/kWh")
 
             # Ledger transaction — pay for the charging slot
             try:
@@ -67,6 +69,7 @@ async def handle_bid(ctx: Context, bid: PowerBid):
                 queue_position=queue_position
             )
             ctx.logger.info(f"Terminal: {bid.truck_id} lost — bay taken")
+            log_event("bid", f"terminal → {bid.truck_id}: REJECTED — bay taken by another truck")
     else:
         # No bays available
         save_bid_response(bid_id, False, None, bid.bid_price, queue_position)
@@ -77,8 +80,9 @@ async def handle_bid(ctx: Context, bid: PowerBid):
             queue_position=queue_position
         )
         ctx.logger.info(f"Terminal: {bid.truck_id} rejected — no bays available")
+        log_event("bid", f"terminal → {bid.truck_id}: REJECTED — no bays available")
 
-    await ctx.send(ctx.sender, response)
+    await ctx.send(sender, response)
 
 
 if __name__ == "__main__":
