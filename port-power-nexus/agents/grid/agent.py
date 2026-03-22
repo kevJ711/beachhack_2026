@@ -62,7 +62,7 @@ def get_supabase() -> Client:
 
 def upsert_auction(sb: Client, auction_id: str, payload: dict) -> None:
     """Insert or update the single active auction row."""
-    sb.table("auction").upsert({"id": auction_id, **payload}).execute()
+    sb.table("auction_state").upsert({"id": auction_id, **payload}).execute()
 
 
 def log_event(sb: Client, event_type: str, message: str) -> None:
@@ -91,11 +91,11 @@ def fetch_caiso_fuel_mix() -> dict:
     Falls back to neutral defaults if the request fails.
     """
     try:
-        url = f"{GRIDSTATUS_BASE_URL}/datasets/caiso_fuel_mix/latest"
+        url = f"{GRIDSTATUS_BASE_URL}/datasets/caiso_fuel_mix/query"
         resp = requests.get(
             url,
             headers=_gridstatus_headers(),
-            params={"iso": "caiso", "limit": 1},
+            params={"limit": 1, "order_by": "interval_start_utc desc"},
             timeout=8,
         )
         resp.raise_for_status()
@@ -109,7 +109,8 @@ def fetch_caiso_fuel_mix() -> dict:
         row = rows[0]
         # Sum renewable sources: solar, wind, geothermal, small_hydro, biomass, biogas
         renewable_keys = ["solar", "wind", "geothermal", "small_hydro", "biomass", "biogas"]
-        total_mw  = row.get("net_generation", 0) or 1  # avoid div/0
+        all_keys = ["solar", "wind", "geothermal", "biomass", "biogas", "small_hydro", "coal", "nuclear", "natural_gas", "large_hydro", "batteries", "imports", "other"]
+        total_mw  = sum(row.get(k, 0) or 0 for k in all_keys) or 1  # avoid div/0
         renew_mw  = sum(row.get(k, 0) or 0 for k in renewable_keys)
         renewable_pct = round((renew_mw / total_mw) * 100, 1)
 
@@ -134,11 +135,11 @@ def fetch_caiso_load() -> dict:
     CAISO_PEAK_CAPACITY_MW = 52_000
 
     try:
-        url = f"{GRIDSTATUS_BASE_URL}/datasets/caiso_load/latest"
+        url = f"{GRIDSTATUS_BASE_URL}/datasets/caiso_load/query"
         resp = requests.get(
             url,
             headers=_gridstatus_headers(),
-            params={"iso": "caiso", "limit": 1},
+            params={"limit": 1, "order_by": "interval_start_utc desc"},
             timeout=8,
         )
         resp.raise_for_status()
@@ -157,16 +158,26 @@ def fetch_caiso_load() -> dict:
         return {"grid_stress": 0.5, "load_mw": 0}
 
 
+_grid_cache: dict = {}
+_grid_cache_time: float = 0.0
+GRID_CACHE_SECONDS = 30
+
 def fetch_grid_data() -> dict:
-    """Merge fuel-mix + load into a single snapshot dict."""
+    """Merge fuel-mix + load into a single snapshot dict. Cached every 30 seconds."""
+    import time
+    global _grid_cache, _grid_cache_time
+    if _grid_cache and (time.time() - _grid_cache_time) < GRID_CACHE_SECONDS:
+        return _grid_cache
     fuel  = fetch_caiso_fuel_mix()
     load  = fetch_caiso_load()
-    return {
+    _grid_cache = {
         "renewable_pct": fuel["renewable_pct"],
         "grid_stress":   load["grid_stress"],
         "ca_iso_zone":   fuel["ca_iso_zone"],
         "load_mw":       load["load_mw"],
     }
+    _grid_cache_time = time.time()
+    return _grid_cache
 
 
 # ---------------------------------------------------------------------------
